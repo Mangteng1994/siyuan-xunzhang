@@ -1,0 +1,15 @@
+.siyuan-xunzhang-highlight {
+  outline: 2px solid var(--b3-theme-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+  animation: siyuan-xunzhang-pulse 1.8s ease-in-out 1;
+}
+
+@keyframes siyuan-xunzhang-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(53, 130, 245, 0.45);
+  }
+  100% {
+    box-shadow: 0 0 0 10px rgba(53, 130, 245, 0);
+  }
+}

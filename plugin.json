@@ -1,0 +1,37 @@
+{
+  "name": "siyuan-xunzhang",
+  "author": "Mangteng1994",
+  "url": "",
+  "version": "0.3.0",
+  "minAppVersion": "3.0.3",
+  "disabledInPublish": false,
+  "backends": [
+    "all"
+  ],
+  "frontends": [
+    "all"
+  ],
+  "displayName": {
+    "default": "Xunzhang",
+    "zh_CN": "寻章"
+  },
+  "description": {
+    "default": "A lightweight SiYuan plugin for document locating and marker-based batch organization.",
+    "zh_CN": "轻量定位与批量整理插件"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh_CN": "README_zh_CN.md"
+  },
+  "keywords": [
+    "xunzhang",
+    "seek",
+    "chapter",
+    "locate",
+    "batch",
+    "marker",
+    "寻章",
+    "定位",
+    "批量整理"
+  ]
+}
