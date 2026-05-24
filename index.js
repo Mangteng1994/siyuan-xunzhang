@@ -20,7 +20,7 @@ const MARK_ALIASES = {
   [MARK_END]: [MARK_END, "批量结束"],
   [MARK_TARGET]: [MARK_TARGET, "批量目标"],
 };
-const PLUGIN_VERSION = "0.3.0";
+const PLUGIN_VERSION = "0.3.2";
 const HIGHLIGHT_CLASS = "siyuan-xunzhang-highlight";
 const ACTIVE_WND_CLASS = "layout__wnd--active";
 const BLOCK_ID_RE = /^\d{14}-[0-9a-z]{7}$/i;
@@ -78,34 +78,6 @@ function ask(title, message) {
 
 function notify(message, isError = false, timeout = 3000) {
   showMessage(message, timeout, isError ? "error" : "info");
-}
-
-function showLoadedBadge(message, isError = false) {
-  if (!document.body) {
-    window.setTimeout(() => showLoadedBadge(message, isError), 300);
-    return;
-  }
-  document.getElementById("siyuan-xunzhang-loaded-badge")?.remove();
-  const badge = document.createElement("div");
-  badge.id = "siyuan-xunzhang-loaded-badge";
-  badge.textContent = message;
-  Object.assign(badge.style, {
-    position: "fixed",
-    top: "12px",
-    right: "12px",
-    zIndex: "999999",
-    padding: "8px 12px",
-    borderRadius: "6px",
-    background: isError ? "var(--b3-theme-error)" : "var(--b3-theme-primary)",
-    color: "var(--b3-theme-on-primary)",
-    boxShadow: "var(--b3-dialog-shadow)",
-    fontSize: "13px",
-    lineHeight: "20px",
-    maxWidth: "360px",
-    wordBreak: "break-word",
-  });
-  document.body.appendChild(badge);
-  window.setTimeout(() => badge.remove(), 3500);
 }
 
 function getAppId() {
@@ -404,7 +376,6 @@ class XunzhangPlugin extends Plugin {
     this.lastActiveBlockId = "";
     this.batchUndoStack = [];
     this.activeObserver = null;
-    this.loadedNoticeShown = false;
     this.onKeyDown = this.onKeyDown.bind(this);
     this.onContentMenu = this.onContentMenu.bind(this);
     this.onBlockMenu = this.onBlockMenu.bind(this);
@@ -443,7 +414,6 @@ class XunzhangPlugin extends Plugin {
     } catch (error) {
       const message = `寻章加载失败：${error.message || error}`;
       console.error("[siyuan-xunzhang] onload failed", error);
-      showLoadedBadge(message, true);
       notify(message, true, 6000);
     }
   }
@@ -455,11 +425,6 @@ class XunzhangPlugin extends Plugin {
   markLoaded(stage) {
     window.__syXunzhangLoaded = PLUGIN_VERSION;
     console.info(`[siyuan-xunzhang] ${stage} v${PLUGIN_VERSION}`);
-    showLoadedBadge(`寻章已加载 v${PLUGIN_VERSION} (${stage})`);
-    if (!this.loadedNoticeShown) {
-      this.loadedNoticeShown = true;
-      window.setTimeout(() => notify(`寻章已加载 v${PLUGIN_VERSION}`, false, 2500), 500);
-    }
   }
 
   onunload() {

@@ -1,11 +1,10 @@
 {
   "name": "siyuan-xunzhang",
   "author": "Mangteng1994",
-  "license": "MIT",
   "url": "https://github.com/Mangteng1994/siyuan-xunzhang",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "minAppVersion": "3.0.3",
-  "disabledInPublish": false,
+  "disabledInPublish": true,
   "backends": [
     "all"
   ],
