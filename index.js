@@ -20,7 +20,7 @@ const MARK_ALIASES = {
   [MARK_END]: [MARK_END, "批量结束"],
   [MARK_TARGET]: [MARK_TARGET, "批量目标"],
 };
-const PLUGIN_VERSION = "0.3.3";
+const PLUGIN_VERSION = "0.3.4";
 const HIGHLIGHT_CLASS = "siyuan-xunzhang-highlight";
 const ACTIVE_WND_CLASS = "layout__wnd--active";
 const BLOCK_ID_RE = /^\d{14}-[0-9a-z]{7}$/i;

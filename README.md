@@ -55,6 +55,13 @@ The undo stack only records new operations performed while the plugin is loaded.
 
 ## Changelog
 
+### v0.3.4
+
+- Keep plugin undo strictly inside Xunzhang's own menu-driven undo stack.
+- Remove the unreliable native `protyle.undo` integration from v0.3.3.
+- Keep `Ctrl+Z` / `Cmd+Z` fully handled by SiYuan.
+- Rebuild `package.zip` for marketplace update detection.
+
 ### v0.3.3
 
 - Keep `Ctrl+Z` / `Cmd+Z` fully handled by SiYuan. Xunzhang no longer globally intercepts editor undo shortcuts.
