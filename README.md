@@ -54,3 +54,15 @@ Batch delete, move, copy, and marker insertion are added to SiYuan's native docu
 - Right-click the top bar icon and choose the undo menu item to use the fallback stack
 
 The fallback stack only records new operations performed while the plugin is loaded. Operations performed before a reload or restart cannot be restored automatically.
+
+## Changelog
+
+### v0.3.3
+
+- Respect SiYuan's native undo order for batch delete, move, and copy. Xunzhang no longer globally intercepts `Ctrl+Z` / `Cmd+Z`.
+- Add batch delete, move, copy, and marker insertion to the active document's native undo stack when possible. The menu undo item remains as a fallback only.
+- Limit batch operations to markers in the current open document to avoid registering undo history on the wrong document.
+- Change marker insertion to update the current empty paragraph only. It no longer creates a new paragraph before or after the current block.
+- Reject marker insertion in non-empty paragraphs with a prompt to create an empty line first.
+- Fix marker insertion so it uses SiYuan's block update API and valid DOM undo data, avoiding abnormal block structure and broken context menus.
+- Remove the "marker help" menu item while keeping legacy marker compatibility for `aacc1`, `aacc2`, and `aacc3`.
