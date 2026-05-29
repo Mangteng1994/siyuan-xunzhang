@@ -20,7 +20,7 @@ const MARK_ALIASES = {
   [MARK_END]: [MARK_END, "批量结束"],
   [MARK_TARGET]: [MARK_TARGET, "批量目标"],
 };
-const PLUGIN_VERSION = "0.3.2";
+const PLUGIN_VERSION = "0.3.3";
 const HIGHLIGHT_CLASS = "siyuan-xunzhang-highlight";
 const ACTIVE_WND_CLASS = "layout__wnd--active";
 const BLOCK_ID_RE = /^\d{14}-[0-9a-z]{7}$/i;
@@ -92,6 +92,70 @@ async function transactions(doOperations, undoOperations = []) {
     transactions: [{ doOperations, undoOperations }],
     reqId: Date.now(),
   });
+}
+
+function isUndoableProtyle(value) {
+  return !!value?.undo && typeof value.undo.add === "function";
+}
+
+function collectProtyles(value, result = [], seen = new Set(), depth = 0) {
+  if (!value || typeof value !== "object" || seen.has(value) || depth > 8 || result.length > 80) return result;
+  seen.add(value);
+  if (isUndoableProtyle(value)) result.push(value);
+  if (value instanceof Map) {
+    value.forEach((item) => collectProtyles(item, result, seen, depth + 1));
+    return result;
+  }
+  for (const key of ["protyle", "editor", "model", "children", "childMap", "layout", "centerLayout", "mobile"]) {
+    const next = value[key];
+    if (Array.isArray(next)) next.forEach((item) => collectProtyles(item, result, seen, depth + 1));
+    else collectProtyles(next, result, seen, depth + 1);
+  }
+  return result;
+}
+
+function getProtyleElement(protyle) {
+  return protyle?.element || protyle?.wysiwyg?.element?.closest?.(".protyle") || protyle?.contentElement?.closest?.(".protyle") || null;
+}
+
+function getProtyleRootId(protyle) {
+  const ids = [
+    protyle?.block?.rootID,
+    protyle?.block?.id,
+    protyle?.options?.blockId,
+    getDocIdFromContainer(getProtyleElement(protyle)),
+  ];
+  return ids.find(isBlockId) || "";
+}
+
+function findNativeUndoProtyle(rootId = "") {
+  const activeElement = document.activeElement?.closest?.(".protyle");
+  const activeRootId = getDocIdFromContainer(activeElement);
+  const canUseActive = !rootId || activeRootId === rootId;
+  const domCandidates = [
+    rootId && document.querySelector(`.protyle-title[data-node-id="${escapeSelector(rootId)}"]`)?.closest?.(".protyle"),
+    rootId && document.querySelector(`.protyle-background[data-node-id="${escapeSelector(rootId)}"]`)?.closest?.(".protyle"),
+    canUseActive && activeElement,
+    !rootId && document.querySelector(`.${ACTIVE_WND_CLASS} .protyle:not(.fn__none)`),
+  ].filter(Boolean);
+
+  const direct = domCandidates
+    .flatMap((element) => [element.protyle, element.__protyle, element._protyle])
+    .find(isUndoableProtyle);
+  if (direct) return direct;
+
+  const protyles = collectProtyles(window.siyuan || {});
+  if (rootId) {
+    const matched = protyles.find((protyle) => getProtyleRootId(protyle) === rootId);
+    if (matched) return matched;
+  }
+
+  const active = canUseActive && protyles.find((protyle) => {
+    const element = getProtyleElement(protyle);
+    return element && activeElement && (element === activeElement || element.contains(activeElement));
+  });
+  if (active) return active;
+  return rootId ? null : protyles[0] || null;
 }
 
 function transDeleteBlocks(ids) {
@@ -282,12 +346,15 @@ async function getDocChildren(docId) {
   return { root, children };
 }
 
-async function findMarkers(needsTarget) {
-  const activeDocId = getActiveDocId();
+async function findMarkers(needsTarget, activeDocId) {
+  if (!isBlockId(activeDocId)) {
+    return { error: "未找到当前打开文档，请先在目标文档中放置光标" };
+  }
   const rows = await sql(`
     SELECT id, root_id, content, markdown
     FROM blocks
     WHERE type = 'p'
+      AND root_id = '${escapeSql(activeDocId)}'
       AND (
         trim(content) IN (${sqlValueList(Object.values(MARK_ALIASES).flat())})
         OR trim(markdown) IN (${sqlValueList(Object.values(MARK_ALIASES).flat())})
@@ -298,14 +365,11 @@ async function findMarkers(needsTarget) {
     ...row,
     marker: normalizeMarker(row.markdown || row.content),
   }));
-  const rowsInActiveDoc = activeDocId ? markerRows.filter((row) => row.root_id === activeDocId) : [];
-  const sourceRows = rowsInActiveDoc.length > 0 ? rowsInActiveDoc : markerRows;
-  const starts = sourceRows.filter((row) => row.marker === MARK_START);
-  const targetRows = rowsInActiveDoc.length > 0 ? rowsInActiveDoc : markerRows;
-  const target = targetRows.find((row) => row.marker === MARK_TARGET);
+  const starts = markerRows.filter((row) => row.marker === MARK_START);
+  const target = markerRows.find((row) => row.marker === MARK_TARGET);
 
   for (const start of starts) {
-    const end = sourceRows.find((row) => row.marker === MARK_END && row.root_id === start.root_id && row.id > start.id);
+    const end = markerRows.find((row) => row.marker === MARK_END && row.root_id === start.root_id && row.id > start.id);
     if (!end) continue;
     return { start, end, target: needsTarget ? target : null };
   }
@@ -313,12 +377,12 @@ async function findMarkers(needsTarget) {
   return { start: starts[0], end: null, target: needsTarget ? target : null };
 }
 
-async function buildMarkerPlan(needsTarget) {
-  const { start, end, target } = await findMarkers(needsTarget);
-  if (!start?.id) return { error: `${markerLabel(MARK_START)} not found` };
-  if (!end?.id) return { error: `${markerLabel(MARK_END)} not found` };
+async function buildMarkerPlan(needsTarget, activeDocId) {
+  const { start, end, target, error } = await findMarkers(needsTarget, activeDocId);
+  if (error) return { error };
+  if (!start?.id || !end?.id) return { error: "当前文档未找到完整标记，请先在当前文档中插入批量开始和批量结束" };
   if (start.root_id !== end.root_id) return { error: `${markerLabel(MARK_START)} ${markerLabel(MARK_END)} must be in the same doc` };
-  if (needsTarget && !target?.id) return { error: `${markerLabel(MARK_TARGET)} not found` };
+  if (needsTarget && !target?.id) return { error: "当前文档未找到批量目标，请先在当前文档中插入目标标记" };
 
   const { children } = await getDocChildren(start.root_id);
   const startIndex = children.findIndex((child) => child.id === start.id);
@@ -334,7 +398,7 @@ async function buildMarkerPlan(needsTarget) {
   let targetBlock = null;
   let targetAnchor = null;
   if (needsTarget && target?.id) {
-    const targetDoc = target.root_id === start.root_id ? { children } : await getDocChildren(target.root_id);
+    const targetDoc = { children };
     const targetIndex = targetDoc.children.findIndex((child) => child.id === target.id);
     if (targetIndex < 0) return { error: `${markerLabel(MARK_TARGET)} 必须是顶层段落标记` };
     targetBlock = targetDoc.children[targetIndex];
@@ -492,14 +556,6 @@ class XunzhangPlugin extends Plugin {
   }
 
   onKeyDown(event) {
-    if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && String(event.key || "").toLowerCase() === "z") {
-      if (this.batchUndoStack.length > 0) {
-        event.preventDefault();
-        event.stopPropagation();
-        this.undoLastBatchOperation();
-      }
-      return;
-    }
     if (event.defaultPrevented || !event.altKey) return;
     if (!event.shiftKey && (event.code === "Enter" || event.key === "Enter")) {
       event.preventDefault();
@@ -551,29 +607,23 @@ class XunzhangPlugin extends Plugin {
     menu.addItem({
       icon: "iconUndo",
       label: "撤销上一次批量操作",
-      accelerator: "Ctrl+Z",
       click: () => this.undoLastBatchOperation(),
     });
     menu.addSeparator?.();
     menu.addItem({
       icon: "iconAdd",
-      label: "插入开始标记：当前块前",
-      click: () => this.insertMarkerBlock(MARK_START, "before"),
+      label: "插入开始标记",
+      click: () => this.insertMarkerBlock(MARK_START),
     });
     menu.addItem({
       icon: "iconAdd",
-      label: "插入结束标记：当前块后",
-      click: () => this.insertMarkerBlock(MARK_END, "after"),
+      label: "插入结束标记",
+      click: () => this.insertMarkerBlock(MARK_END),
     });
     menu.addItem({
       icon: "iconAdd",
-      label: "插入目标标记：当前块后",
-      click: () => this.insertMarkerBlock(MARK_TARGET, "after"),
-    });
-    menu.addItem({
-      icon: "iconHelp",
-      label: "标记说明：也兼容 aacc1/aacc2/aacc3",
-      click: () => notify("可用标记：批量开始/批量结束/批量目标；也兼容 aacc1/aacc2/aacc3", false, 6000),
+      label: "插入目标标记",
+      click: () => this.insertMarkerBlock(MARK_TARGET),
     });
     menu.addSeparator?.();
     menu.addItem({
@@ -603,29 +653,32 @@ class XunzhangPlugin extends Plugin {
     menu.open(rect && rect.width > 0 ? { x: rect.left, y: rect.bottom } : { x: 80, y: 48 });
   }
 
-  async insertMarkerBlock(marker, position) {
+  async insertMarkerBlock(marker) {
     const text = MARK_ALIASES[marker]?.[1] || marker;
     try {
       this.rememberActiveBlock();
       const blockId = getActiveBlockId(this.lastActivePart, this.lastActiveBlockId);
-      const docId = getActiveDocId(this.lastActivePart);
-      if (!blockId && !docId) {
+      if (!blockId) {
         notify("未找到当前光标所在块", true, 3500);
         return;
       }
 
-      const payload = {
-        dataType: "markdown",
-        data: text,
-      };
-      if (blockId) {
-        if (position === "before") payload.nextID = blockId;
-        else payload.previousID = blockId;
-      } else {
-        payload.parentID = docId;
+      const rows = await sql(`
+        SELECT id, root_id, type, content, markdown
+        FROM blocks
+        WHERE id = '${escapeSql(blockId)}'
+        LIMIT 1
+      `);
+      const block = rows[0];
+      const visibleText = String(block?.markdown || block?.content || "").replace(/[\s\u00a0\u200b]/g, "");
+      if (!block || block.type !== "p" || visibleText !== "") {
+        notify("请先在目标位置新建空行，再插入标记", true, 3500);
+        return;
       }
 
-      await api("/api/block/insertBlock", payload);
+      const doOperations = [{ action: "update", id: blockId, dataType: "markdown", data: text }];
+      const undoOperations = [{ action: "update", id: blockId, dataType: "markdown", data: "" }];
+      await this.runNativeUndoableTransaction("插入标记", doOperations, undoOperations, block.root_id);
       await api("/api/sqlite/flushTransaction", {}).catch(() => null);
       notify(`已插入标记：${text}`, false, 2500);
     } catch (error) {
@@ -638,6 +691,20 @@ class XunzhangPlugin extends Plugin {
     if (!operations?.length) return;
     this.batchUndoStack.push({ label, operations });
     if (this.batchUndoStack.length > 5) this.batchUndoStack.shift();
+  }
+
+  async runNativeUndoableTransaction(label, doOperations, undoOperations = [], rootId = "") {
+    await transactions(doOperations, undoOperations);
+    const protyle = findNativeUndoProtyle(rootId);
+    if (isUndoableProtyle(protyle)) {
+      try {
+        protyle.undo.add(doOperations, undoOperations, protyle);
+        return;
+      } catch (error) {
+        console.warn("[siyuan-xunzhang] protyle undo add failed", error);
+      }
+    }
+    this.pushBatchUndo(label, undoOperations);
   }
 
   async undoLastBatchOperation() {
@@ -704,7 +771,8 @@ class XunzhangPlugin extends Plugin {
     return withLock(async () => {
       try {
         notify("批量删除正在检查数据...", false, 1600);
-        const plan = await buildMarkerPlan(false);
+        const activeDocId = getActiveDocId(this.lastActivePart);
+        const plan = await buildMarkerPlan(false, activeDocId);
         if (plan.error) {
           notify(plan.error, true, 4000);
           return;
@@ -718,8 +786,7 @@ class XunzhangPlugin extends Plugin {
         const deletedIds = [plan.startId, ...plan.content.map((item) => item.id), plan.endId];
         const deletedDoms = [plan.startBlock, ...plan.content, plan.endBlock].map(blockDom);
         const undoOperations = transInsertBlocksAt(deletedDoms, plan.sourceRangeAnchor);
-        await transactions(transDeleteBlocks(deletedIds));
-        this.pushBatchUndo("批量删除", undoOperations);
+        await this.runNativeUndoableTransaction("批量删除", transDeleteBlocks(deletedIds), undoOperations, plan.sourceRootId);
         await api("/api/sqlite/flushTransaction", {}).catch(() => null);
         notify(`批量删除完成：${plan.content.length} 个内容块`, false, 3000);
       } catch (error) {
@@ -733,7 +800,8 @@ class XunzhangPlugin extends Plugin {
     return withLock(async () => {
       try {
         notify("批量移动正在检查数据...", false, 1600);
-        const plan = await buildMarkerPlan(true);
+        const activeDocId = getActiveDocId(this.lastActivePart);
+        const plan = await buildMarkerPlan(true, activeDocId);
         if (plan.error) {
           notify(plan.error, true, 4000);
           return;
@@ -759,8 +827,7 @@ class XunzhangPlugin extends Plugin {
           transInsertBlockAt(blockDom(plan.endBlock), { previousID: contentIds[contentIds.length - 1] }),
           transInsertBlockAt(blockDom(plan.targetBlock), plan.targetAnchor),
         ];
-        await transactions(operations);
-        this.pushBatchUndo("批量移动", undoOperations);
+        await this.runNativeUndoableTransaction("批量移动", operations, undoOperations, plan.sourceRootId);
         await api("/api/sqlite/flushTransaction", {}).catch(() => null);
         await this.openBlock(contentIds[0]);
         notify(`批量移动完成：${contentIds.length} 个内容块`, false, 3000);
@@ -775,7 +842,8 @@ class XunzhangPlugin extends Plugin {
     return withLock(async () => {
       try {
         notify("批量复制正在检查数据...", false, 1600);
-        const plan = await buildMarkerPlan(true);
+        const activeDocId = getActiveDocId(this.lastActivePart);
+        const plan = await buildMarkerPlan(true, activeDocId);
         if (plan.error) {
           notify(plan.error, true, 4000);
           return;
@@ -797,8 +865,7 @@ class XunzhangPlugin extends Plugin {
           transInsertBlockAt(blockDom(plan.endBlock), plan.endAnchor),
           transInsertBlockAt(blockDom(plan.targetBlock), plan.targetAnchor),
         ];
-        await transactions(operations);
-        this.pushBatchUndo("批量复制", undoOperations);
+        await this.runNativeUndoableTransaction("批量复制", operations, undoOperations, plan.sourceRootId);
         await api("/api/sqlite/flushTransaction", {}).catch(() => null);
         notify(`批量复制完成：${plan.content.length} 个内容块`, false, 3000);
       } catch (error) {
