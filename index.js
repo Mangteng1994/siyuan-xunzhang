@@ -94,70 +94,6 @@ async function transactions(doOperations, undoOperations = []) {
   });
 }
 
-function isUndoableProtyle(value) {
-  return !!value?.undo && typeof value.undo.add === "function";
-}
-
-function collectProtyles(value, result = [], seen = new Set(), depth = 0) {
-  if (!value || typeof value !== "object" || seen.has(value) || depth > 8 || result.length > 80) return result;
-  seen.add(value);
-  if (isUndoableProtyle(value)) result.push(value);
-  if (value instanceof Map) {
-    value.forEach((item) => collectProtyles(item, result, seen, depth + 1));
-    return result;
-  }
-  for (const key of ["protyle", "editor", "model", "children", "childMap", "layout", "centerLayout", "mobile"]) {
-    const next = value[key];
-    if (Array.isArray(next)) next.forEach((item) => collectProtyles(item, result, seen, depth + 1));
-    else collectProtyles(next, result, seen, depth + 1);
-  }
-  return result;
-}
-
-function getProtyleElement(protyle) {
-  return protyle?.element || protyle?.wysiwyg?.element?.closest?.(".protyle") || protyle?.contentElement?.closest?.(".protyle") || null;
-}
-
-function getProtyleRootId(protyle) {
-  const ids = [
-    protyle?.block?.rootID,
-    protyle?.block?.id,
-    protyle?.options?.blockId,
-    getDocIdFromContainer(getProtyleElement(protyle)),
-  ];
-  return ids.find(isBlockId) || "";
-}
-
-function findNativeUndoProtyle(rootId = "") {
-  const activeElement = document.activeElement?.closest?.(".protyle");
-  const activeRootId = getDocIdFromContainer(activeElement);
-  const canUseActive = !rootId || activeRootId === rootId;
-  const domCandidates = [
-    rootId && document.querySelector(`.protyle-title[data-node-id="${escapeSelector(rootId)}"]`)?.closest?.(".protyle"),
-    rootId && document.querySelector(`.protyle-background[data-node-id="${escapeSelector(rootId)}"]`)?.closest?.(".protyle"),
-    canUseActive && activeElement,
-    !rootId && document.querySelector(`.${ACTIVE_WND_CLASS} .protyle:not(.fn__none)`),
-  ].filter(Boolean);
-
-  const direct = domCandidates
-    .flatMap((element) => [element.protyle, element.__protyle, element._protyle])
-    .find(isUndoableProtyle);
-  if (direct) return direct;
-
-  const protyles = collectProtyles(window.siyuan || {});
-  if (rootId) {
-    const matched = protyles.find((protyle) => getProtyleRootId(protyle) === rootId);
-    if (matched) return matched;
-  }
-
-  const active = canUseActive && protyles.find((protyle) => {
-    const element = getProtyleElement(protyle);
-    return element && activeElement && (element === activeElement || element.contains(activeElement));
-  });
-  if (active) return active;
-  return rootId ? null : protyles[0] || null;
-}
-
 function transDeleteBlocks(ids) {
   return uniq(ids).filter(isBlockId).map((id) => ({ action: "delete", id }));
 }
@@ -683,19 +619,13 @@ class XunzhangPlugin extends Plugin {
         return;
       }
 
-      const txs = await api("/api/block/updateBlock", {
+      await api("/api/block/updateBlock", {
         id: blockId,
         dataType: "markdown",
         data: text,
       });
-      const doOperations = txs?.[0]?.doOperations || [];
       const undoOperations = [{ action: "update", id: blockId, data: oldDom }];
-      const protyle = findNativeUndoProtyle(block.root_id);
-      if (isUndoableProtyle(protyle) && doOperations.length) {
-        protyle.undo.add(doOperations, undoOperations, protyle);
-      } else {
-        this.pushBatchUndo("插入标记", undoOperations);
-      }
+      this.pushBatchUndo("插入标记", undoOperations);
       await api("/api/sqlite/flushTransaction", {}).catch(() => null);
       notify(`已插入标记：${text}`, false, 2500);
     } catch (error) {
@@ -710,17 +640,8 @@ class XunzhangPlugin extends Plugin {
     if (this.batchUndoStack.length > 5) this.batchUndoStack.shift();
   }
 
-  async runNativeUndoableTransaction(label, doOperations, undoOperations = [], rootId = "") {
+  async runPluginUndoableTransaction(label, doOperations, undoOperations = []) {
     await transactions(doOperations, undoOperations);
-    const protyle = findNativeUndoProtyle(rootId);
-    if (isUndoableProtyle(protyle)) {
-      try {
-        protyle.undo.add(doOperations, undoOperations, protyle);
-        return;
-      } catch (error) {
-        console.warn("[siyuan-xunzhang] protyle undo add failed", error);
-      }
-    }
     this.pushBatchUndo(label, undoOperations);
   }
 
@@ -803,7 +724,7 @@ class XunzhangPlugin extends Plugin {
         const deletedIds = [plan.startId, ...plan.content.map((item) => item.id), plan.endId];
         const deletedDoms = [plan.startBlock, ...plan.content, plan.endBlock].map(blockDom);
         const undoOperations = transInsertBlocksAt(deletedDoms, plan.sourceRangeAnchor);
-        await this.runNativeUndoableTransaction("批量删除", transDeleteBlocks(deletedIds), undoOperations, plan.sourceRootId);
+        await this.runPluginUndoableTransaction("批量删除", transDeleteBlocks(deletedIds), undoOperations);
         await api("/api/sqlite/flushTransaction", {}).catch(() => null);
         notify(`批量删除完成：${plan.content.length} 个内容块`, false, 3000);
       } catch (error) {
@@ -844,7 +765,7 @@ class XunzhangPlugin extends Plugin {
           transInsertBlockAt(blockDom(plan.endBlock), { previousID: contentIds[contentIds.length - 1] }),
           transInsertBlockAt(blockDom(plan.targetBlock), plan.targetAnchor),
         ];
-        await this.runNativeUndoableTransaction("批量移动", operations, undoOperations, plan.sourceRootId);
+        await this.runPluginUndoableTransaction("批量移动", operations, undoOperations);
         await api("/api/sqlite/flushTransaction", {}).catch(() => null);
         await this.openBlock(contentIds[0]);
         notify(`批量移动完成：${contentIds.length} 个内容块`, false, 3000);
@@ -882,7 +803,7 @@ class XunzhangPlugin extends Plugin {
           transInsertBlockAt(blockDom(plan.endBlock), plan.endAnchor),
           transInsertBlockAt(blockDom(plan.targetBlock), plan.targetAnchor),
         ];
-        await this.runNativeUndoableTransaction("批量复制", operations, undoOperations, plan.sourceRootId);
+        await this.runPluginUndoableTransaction("批量复制", operations, undoOperations);
         await api("/api/sqlite/flushTransaction", {}).catch(() => null);
         notify(`批量复制完成：${plan.content.length} 个内容块`, false, 3000);
       } catch (error) {

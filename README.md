@@ -47,20 +47,18 @@ Marker lines are removed after each operation.
 
 ## Undo
 
-Batch delete, move, copy, and marker insertion are added to SiYuan's native document undo stack when the active editor can be found.
+Xunzhang keeps a plugin-level undo stack for the latest 5 plugin operations. After inserting markers or running batch delete, move, or copy, use the top bar context menu item "Undo latest batch operation" to undo it.
 
-- Press `Ctrl+Z` in the same document to follow SiYuan's native undo order
-- If no active editor is available, Xunzhang keeps a fallback plugin-level undo stack for the last 5 batch operations
-- Right-click the top bar icon and choose the undo menu item to use the fallback stack
+Xunzhang does not intercept `Ctrl+Z` / `Cmd+Z`. Native editor undo remains handled by SiYuan.
 
-The fallback stack only records new operations performed while the plugin is loaded. Operations performed before a reload or restart cannot be restored automatically.
+The undo stack only records new operations performed while the plugin is loaded. Operations performed before a reload or restart cannot be restored automatically.
 
 ## Changelog
 
 ### v0.3.3
 
-- Respect SiYuan's native undo order for batch delete, move, and copy. Xunzhang no longer globally intercepts `Ctrl+Z` / `Cmd+Z`.
-- Add batch delete, move, copy, and marker insertion to the active document's native undo stack when possible. The menu undo item remains as a fallback only.
+- Keep `Ctrl+Z` / `Cmd+Z` fully handled by SiYuan. Xunzhang no longer globally intercepts editor undo shortcuts.
+- Keep a plugin-level undo stack for marker insertion, batch delete, batch move, and batch copy. The top bar context menu undo item is the only Xunzhang undo entry.
 - Limit batch operations to markers in the current open document to avoid registering undo history on the wrong document.
 - Change marker insertion to update the current empty paragraph only. It no longer creates a new paragraph before or after the current block.
 - Reject marker insertion in non-empty paragraphs with a prompt to create an empty line first.
