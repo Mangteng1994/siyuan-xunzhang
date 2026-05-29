@@ -676,9 +676,26 @@ class XunzhangPlugin extends Plugin {
         return;
       }
 
-      const doOperations = [{ action: "update", id: blockId, dataType: "markdown", data: text }];
-      const undoOperations = [{ action: "update", id: blockId, dataType: "markdown", data: "" }];
-      await this.runNativeUndoableTransaction("插入标记", doOperations, undoOperations, block.root_id);
+      const oldDomData = await api("/api/block/getBlockDOM", { id: blockId });
+      const oldDom = oldDomData?.dom || "";
+      if (!oldDom) {
+        notify("读取当前空行失败，无法插入标记", true, 3500);
+        return;
+      }
+
+      const txs = await api("/api/block/updateBlock", {
+        id: blockId,
+        dataType: "markdown",
+        data: text,
+      });
+      const doOperations = txs?.[0]?.doOperations || [];
+      const undoOperations = [{ action: "update", id: blockId, data: oldDom }];
+      const protyle = findNativeUndoProtyle(block.root_id);
+      if (isUndoableProtyle(protyle) && doOperations.length) {
+        protyle.undo.add(doOperations, undoOperations, protyle);
+      } else {
+        this.pushBatchUndo("插入标记", undoOperations);
+      }
       await api("/api/sqlite/flushTransaction", {}).catch(() => null);
       notify(`已插入标记：${text}`, false, 2500);
     } catch (error) {
