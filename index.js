@@ -21,6 +21,7 @@ const MARK_ALIASES = {
   [MARK_TARGET]: [MARK_TARGET, "批量目标"],
 };
 const PLUGIN_VERSION = "0.3.4";
+const DEBUG_XUNZHANG = false;
 const HIGHLIGHT_CLASS = "siyuan-xunzhang-highlight";
 const ACTIVE_WND_CLASS = "layout__wnd--active";
 const BLOCK_ID_RE = /^\d{14}-[0-9a-z]{7}$/i;
@@ -42,10 +43,14 @@ function sqlValueList(values) {
   return values.map((value) => `'${escapeSql(value)}'`).join(", ");
 }
 
+function cleanMarkerText(value) {
+  return String(value || "").replace(/[\s\u00a0\u200b\ufeff]/g, "").trim();
+}
+
 function normalizeMarker(value) {
-  const text = String(value || "").trim();
+  const text = cleanMarkerText(value);
   for (const [marker, aliases] of Object.entries(MARK_ALIASES)) {
-    if (aliases.includes(text)) return marker;
+    if (aliases.some((alias) => cleanMarkerText(alias) === text)) return marker;
   }
   return "";
 }
@@ -70,6 +75,46 @@ async function api(path, data = {}) {
 async function sql(stmt) {
   const data = await api("/api/query/sql", { stmt });
   return Array.isArray(data) ? data : [];
+}
+
+function debugLog(scope, payload) {
+  if (!DEBUG_XUNZHANG) return;
+  console.info(`[siyuan-xunzhang][debug] ${scope}`, payload);
+}
+
+async function getBlockRow(id) {
+  if (!isBlockId(id)) return null;
+  const rows = await sql(`
+    SELECT id, root_id, type, content, markdown
+    FROM blocks
+    WHERE id = '${escapeSql(id)}'
+    LIMIT 1
+  `);
+  return rows[0] || null;
+}
+
+async function queryMarkerRows(rootId) {
+  if (!isBlockId(rootId)) return [];
+  const allAliases = uniq(Object.values(MARK_ALIASES).flat());
+  const likeClauses = allAliases
+    .map((value) => {
+      const escaped = escapeSql(value).replaceAll("%", "\\%").replaceAll("_", "\\_");
+      return `content LIKE '%${escaped}%' ESCAPE '\\' OR markdown LIKE '%${escaped}%' ESCAPE '\\'`;
+    })
+    .join("\n        OR ");
+  const rows = await sql(`
+    SELECT id, root_id, type, content, markdown
+    FROM blocks
+    WHERE root_id = '${escapeSql(rootId)}'
+      AND (
+        ${likeClauses}
+      )
+  `);
+  return rows
+    .map((row) => ({
+      ...row,
+      marker: normalizeMarker(row.markdown || row.content),
+    }));
 }
 
 function ask(title, message) {
@@ -223,6 +268,17 @@ function findFileTreeNode(id) {
   return document.querySelector(`.file-tree [data-node-id="${escapeSelector(id)}"], .file-tree [data-id="${escapeSelector(id)}"]`);
 }
 
+function describeActiveElement() {
+  const element = document.activeElement;
+  if (!element) return null;
+  return {
+    tagName: element.tagName || "",
+    id: element.id || "",
+    className: typeof element.className === "string" ? element.className : "",
+    datasetNodeId: element.getAttribute?.("data-node-id") || "",
+  };
+}
+
 function newBlockId() {
   if (globalThis.Lute?.NewNodeID) return globalThis.Lute.NewNodeID();
   const pad = (value) => String(value).padStart(2, "0");
@@ -282,42 +338,130 @@ async function getDocChildren(docId) {
   return { root, children };
 }
 
+function markerDebugRowFromChild(child, rootId) {
+  const text = String(child?.element?.textContent || "");
+  return {
+    id: child?.id || "",
+    root_id: rootId,
+    type: child?.element?.getAttribute?.("data-type") || child?.element?.dataset?.type || "",
+    content: text,
+    markdown: text,
+    marker: normalizeMarker(text),
+  };
+}
+
+function markerDebugRows(rows) {
+  return rows.map((row) => ({
+    id: row.id,
+    root_id: row.root_id,
+    type: row.type,
+    content: row.content,
+    markdown: row.markdown,
+    marker: row.marker,
+  }));
+}
+
+function logMarkerDebug(scope, payload) {
+  debugLog(scope, payload);
+}
+
 async function findMarkers(needsTarget, activeDocId) {
+  logMarkerDebug("findMarkers:input", { activeDocId, needsTarget });
   if (!isBlockId(activeDocId)) {
-    return { error: "未找到当前打开文档，请先在目标文档中放置光标" };
+    logMarkerDebug("findMarkers:invalid-active-doc", { activeDocId, sqlMarkers: [], domMarkers: [] });
+    return { error: "未能识别当前文档，请先点击正文后再操作", sqlMarkers: [], domMarkers: [], children: [] };
   }
+  const sqlMarkers = await queryMarkerRows(activeDocId);
   const { children } = await getDocChildren(activeDocId);
-  const markerRows = children
-    .map((child) => ({
-      id: child.id,
-      root_id: activeDocId,
-      element: child.element,
-      marker: normalizeMarker(child.element?.textContent),
-    }))
-    .filter((row) => row.marker);
-  const starts = markerRows.filter((row) => row.marker === MARK_START);
-  const target = markerRows.find((row) => row.marker === MARK_TARGET);
+  const domChildren = children.map((child) => markerDebugRowFromChild(child, activeDocId));
+  const domMarkers = domChildren.filter((row) => row.marker);
+  logMarkerDebug("findMarkers:candidates", {
+    activeDocId,
+    sqlMarkerCount: sqlMarkers.length,
+    domChildrenCount: domChildren.length,
+    domMarkerCount: domMarkers.length,
+    sqlMarkers: markerDebugRows(sqlMarkers),
+    domChildren: markerDebugRows(domChildren),
+    domMarkers: markerDebugRows(domMarkers),
+  });
+  const starts = domMarkers.filter((row) => row.marker === MARK_START);
+  const ends = domMarkers.filter((row) => row.marker === MARK_END);
+  const target = domMarkers.find((row) => row.marker === MARK_TARGET);
 
   for (const start of starts) {
-    const startIndex = markerRows.findIndex((row) => row.id === start.id);
-    const end = markerRows.slice(startIndex + 1).find((row) => row.marker === MARK_END && row.root_id === start.root_id);
+    const startIndex = domMarkers.findIndex((row) => row.id === start.id);
+    const end = domMarkers.slice(startIndex + 1).find((row) => row.marker === MARK_END && row.root_id === start.root_id);
     if (!end) continue;
-    return { start, end, target: needsTarget ? target : null, children };
+    const result = { start, end, target: needsTarget ? target : null, children, sqlMarkers, domMarkers, hasOrderedPair: true };
+    logMarkerDebug("findMarkers:result", {
+      activeDocId,
+      start,
+      end,
+      target: needsTarget ? target : null,
+      ordered: true,
+      sqlMarkers: markerDebugRows(sqlMarkers),
+      domMarkers: markerDebugRows(domMarkers),
+    });
+    return result;
   }
 
-  return { start: starts[0], end: null, target: needsTarget ? target : null, children };
+  const result = { start: starts[0], end: null, target: needsTarget ? target : null, children, sqlMarkers, domMarkers, hasOrderedPair: false };
+  logMarkerDebug("findMarkers:result", {
+    activeDocId,
+    start: result.start || null,
+    end: null,
+    target: needsTarget ? target || null : null,
+    ordered: false,
+    sqlMarkers: markerDebugRows(sqlMarkers),
+    domMarkers: markerDebugRows(domMarkers),
+  });
+  return result;
 }
 
 async function buildMarkerPlan(needsTarget, activeDocId) {
-  const { start, end, target, children, error } = await findMarkers(needsTarget, activeDocId);
+  const {
+    start,
+    end,
+    target,
+    children,
+    sqlMarkers,
+    domMarkers,
+    hasOrderedPair,
+    error,
+  } = await findMarkers(needsTarget, activeDocId);
+  logMarkerDebug("buildMarkerPlan:input", {
+    activeDocId,
+    needsTarget,
+    start: start || null,
+    end: end || null,
+    target: target || null,
+    sqlMarkers: markerDebugRows(sqlMarkers || []),
+    domMarkers: markerDebugRows(domMarkers || []),
+  });
   if (error) return { error };
-  if (!start?.id || !end?.id) return { error: "当前文档未找到完整标记，请先在当前文档中插入批量开始和批量结束" };
+  const sqlStarts = sqlMarkers.filter((row) => row.marker === MARK_START);
+  const sqlEnds = sqlMarkers.filter((row) => row.marker === MARK_END);
+  const sqlTargets = sqlMarkers.filter((row) => row.marker === MARK_TARGET);
+  const domStarts = domMarkers.filter((row) => row.marker === MARK_START);
+  const domEnds = domMarkers.filter((row) => row.marker === MARK_END);
+
+  if (!domStarts.length) {
+    return { error: sqlStarts.length ? "标记必须放在当前文档顶层独立段落中" : "当前文档没有开始标记" };
+  }
+  if (!domEnds.length) {
+    return { error: sqlEnds.length ? "标记必须放在当前文档顶层独立段落中" : "当前文档没有结束标记" };
+  }
+  if (!hasOrderedPair || !start?.id || !end?.id) {
+    return { error: `${markerLabel(MARK_START)}/${markerLabel(MARK_END)} 顺序错误，开始标记必须在结束标记之前` };
+  }
   if (start.root_id !== end.root_id) return { error: `${markerLabel(MARK_START)} ${markerLabel(MARK_END)} must be in the same doc` };
-  if (needsTarget && !target?.id) return { error: "当前文档未找到批量目标，请先在当前文档中插入目标标记" };
+  if (needsTarget && !target?.id) {
+    return { error: sqlTargets.length ? "标记必须放在当前文档顶层独立段落中" : "当前文档未找到批量目标，请先在当前文档中插入目标标记" };
+  }
   const startIndex = children.findIndex((child) => child.id === start.id);
   const endIndex = children.findIndex((child) => child.id === end.id);
   if (startIndex < 0 || endIndex < 0 || startIndex >= endIndex) {
-    return { error: `${markerLabel(MARK_START)}/${markerLabel(MARK_END)} 必须是同一文档中的顶层段落标记，并且开始标记在前` };
+    return { error: `${markerLabel(MARK_START)}/${markerLabel(MARK_END)} 顺序错误，开始标记必须在结束标记之前` };
   }
 
   const content = children.slice(startIndex + 1, endIndex);
@@ -329,7 +473,7 @@ async function buildMarkerPlan(needsTarget, activeDocId) {
   if (needsTarget && target?.id) {
     const targetDoc = { children };
     const targetIndex = targetDoc.children.findIndex((child) => child.id === target.id);
-    if (targetIndex < 0) return { error: `${markerLabel(MARK_TARGET)} 必须是顶层段落标记` };
+    if (targetIndex < 0) return { error: "标记必须放在当前文档顶层独立段落中" };
     targetBlock = targetDoc.children[targetIndex];
     targetAnchor = anchorAt(targetDoc.children, targetIndex, target.root_id, new Set([...sourceDeletedIds, target.id]));
   }
@@ -367,6 +511,8 @@ class XunzhangPlugin extends Plugin {
     this.topBarElement = null;
     this.lastActivePart = null;
     this.lastActiveBlockId = "";
+    this.lastMarkerRootId = "";
+    this.lastMarkerBlockIds = {};
     this.batchUndoStack = [];
     this.activeObserver = null;
     this.onKeyDown = this.onKeyDown.bind(this);
@@ -482,6 +628,75 @@ class XunzhangPlugin extends Plugin {
   rememberActiveBlock() {
     const blockId = getActiveBlockId(this.lastActivePart, "");
     if (blockId) this.lastActiveBlockId = blockId;
+  }
+
+  async resolveCurrentDocId() {
+    this.rememberActiveBlock();
+    const activeDocId = getActiveDocId(this.lastActivePart);
+    if (isBlockId(activeDocId)) {
+      debugLog("resolveCurrentDocId", {
+        source: "activeDocId",
+        activeDocId,
+        lastActiveBlockId: this.lastActiveBlockId,
+        lastMarkerRootId: this.lastMarkerRootId,
+      });
+      return activeDocId;
+    }
+
+    const activeBlockId = getActiveBlockId(this.lastActivePart, this.lastActiveBlockId);
+    const activeBlock = await getBlockRow(activeBlockId);
+    if (isBlockId(activeBlock?.root_id)) {
+      debugLog("resolveCurrentDocId", {
+        source: "activeBlock.root_id",
+        activeDocId: activeBlock.root_id,
+        activeBlockId,
+        lastActiveBlockId: this.lastActiveBlockId,
+        lastMarkerRootId: this.lastMarkerRootId,
+      });
+      return activeBlock.root_id;
+    }
+
+    if (isBlockId(this.lastMarkerRootId)) {
+      debugLog("resolveCurrentDocId", {
+        source: "lastMarkerRootId",
+        activeDocId: this.lastMarkerRootId,
+        activeBlockId,
+        lastActiveBlockId: this.lastActiveBlockId,
+      });
+      return this.lastMarkerRootId;
+    }
+
+    for (const markerBlockId of Object.values(this.lastMarkerBlockIds)) {
+      const markerBlock = await getBlockRow(markerBlockId);
+      if (isBlockId(markerBlock?.root_id)) {
+        debugLog("resolveCurrentDocId", {
+          source: "markerBlock.root_id",
+          activeDocId: markerBlock.root_id,
+          markerBlockId,
+          lastActiveBlockId: this.lastActiveBlockId,
+        });
+        return markerBlock.root_id;
+      }
+    }
+
+    debugLog("resolveCurrentDocId", {
+      source: "empty",
+      activeDocId,
+      activeBlockId,
+      lastActiveBlockId: this.lastActiveBlockId,
+      lastMarkerRootId: this.lastMarkerRootId,
+    });
+    return activeDocId || "";
+  }
+
+  async logOperationContext(operation, activeDocId) {
+    debugLog("operation", {
+      operation,
+      activeDocId,
+      lastActiveBlockId: this.lastActiveBlockId,
+      hasLastActivePart: Boolean(this.lastActivePart),
+      activeElement: describeActiveElement(),
+    });
   }
 
   onKeyDown(event) {
@@ -617,6 +832,8 @@ class XunzhangPlugin extends Plugin {
         dataType: "markdown",
         data: text,
       });
+      this.lastMarkerRootId = block.root_id || "";
+      this.lastMarkerBlockIds[marker] = blockId;
       const undoOperations = [{ action: "update", id: blockId, data: oldDom }];
       this.pushBatchUndo("插入标记", undoOperations);
       await api("/api/sqlite/flushTransaction", {}).catch(() => null);
@@ -702,7 +919,8 @@ class XunzhangPlugin extends Plugin {
     return withLock(async () => {
       try {
         notify("批量删除正在检查数据...", false, 1600);
-        const activeDocId = getActiveDocId(this.lastActivePart);
+        const activeDocId = await this.resolveCurrentDocId();
+        await this.logOperationContext("delete", activeDocId);
         const plan = await buildMarkerPlan(false, activeDocId);
         if (plan.error) {
           notify(plan.error, true, 4000);
@@ -731,7 +949,8 @@ class XunzhangPlugin extends Plugin {
     return withLock(async () => {
       try {
         notify("批量移动正在检查数据...", false, 1600);
-        const activeDocId = getActiveDocId(this.lastActivePart);
+        const activeDocId = await this.resolveCurrentDocId();
+        await this.logOperationContext("move", activeDocId);
         const plan = await buildMarkerPlan(true, activeDocId);
         if (plan.error) {
           notify(plan.error, true, 4000);
@@ -773,7 +992,8 @@ class XunzhangPlugin extends Plugin {
     return withLock(async () => {
       try {
         notify("批量复制正在检查数据...", false, 1600);
-        const activeDocId = getActiveDocId(this.lastActivePart);
+        const activeDocId = await this.resolveCurrentDocId();
+        await this.logOperationContext("copy", activeDocId);
         const plan = await buildMarkerPlan(true, activeDocId);
         if (plan.error) {
           notify(plan.error, true, 4000);
