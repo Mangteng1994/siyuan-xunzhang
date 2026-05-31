@@ -55,6 +55,13 @@ The undo stack only records new operations performed while the plugin is loaded.
 
 ## Changelog
 
+### v0.3.5
+
+- Support moving and copying marked ranges across documents when the start/end markers are in the source document and the target marker is in another document.
+- Prefer the latest markers inserted by Xunzhang itself to reduce accidental matches from older marker history.
+- Improve marker insertion on newly created empty paragraphs by preferring the current DOM block and retrying briefly while SiYuan syncs block state.
+- Stop awaiting `flushTransaction` after marker insertion so the top bar context menu remains responsive for consecutive marker insertion.
+
 ### v0.3.4
 
 - Keep plugin undo strictly inside Xunzhang's own menu-driven undo stack.
