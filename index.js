@@ -286,41 +286,34 @@ async function findMarkers(needsTarget, activeDocId) {
   if (!isBlockId(activeDocId)) {
     return { error: "未找到当前打开文档，请先在目标文档中放置光标" };
   }
-  const rows = await sql(`
-    SELECT id, root_id, content, markdown
-    FROM blocks
-    WHERE type = 'p'
-      AND root_id = '${escapeSql(activeDocId)}'
-      AND (
-        trim(content) IN (${sqlValueList(Object.values(MARK_ALIASES).flat())})
-        OR trim(markdown) IN (${sqlValueList(Object.values(MARK_ALIASES).flat())})
-      )
-    ORDER BY id
-  `);
-  const markerRows = rows.map((row) => ({
-    ...row,
-    marker: normalizeMarker(row.markdown || row.content),
-  }));
+  const { children } = await getDocChildren(activeDocId);
+  const markerRows = children
+    .map((child) => ({
+      id: child.id,
+      root_id: activeDocId,
+      element: child.element,
+      marker: normalizeMarker(child.element?.textContent),
+    }))
+    .filter((row) => row.marker);
   const starts = markerRows.filter((row) => row.marker === MARK_START);
   const target = markerRows.find((row) => row.marker === MARK_TARGET);
 
   for (const start of starts) {
-    const end = markerRows.find((row) => row.marker === MARK_END && row.root_id === start.root_id && row.id > start.id);
+    const startIndex = markerRows.findIndex((row) => row.id === start.id);
+    const end = markerRows.slice(startIndex + 1).find((row) => row.marker === MARK_END && row.root_id === start.root_id);
     if (!end) continue;
-    return { start, end, target: needsTarget ? target : null };
+    return { start, end, target: needsTarget ? target : null, children };
   }
 
-  return { start: starts[0], end: null, target: needsTarget ? target : null };
+  return { start: starts[0], end: null, target: needsTarget ? target : null, children };
 }
 
 async function buildMarkerPlan(needsTarget, activeDocId) {
-  const { start, end, target, error } = await findMarkers(needsTarget, activeDocId);
+  const { start, end, target, children, error } = await findMarkers(needsTarget, activeDocId);
   if (error) return { error };
   if (!start?.id || !end?.id) return { error: "当前文档未找到完整标记，请先在当前文档中插入批量开始和批量结束" };
   if (start.root_id !== end.root_id) return { error: `${markerLabel(MARK_START)} ${markerLabel(MARK_END)} must be in the same doc` };
   if (needsTarget && !target?.id) return { error: "当前文档未找到批量目标，请先在当前文档中插入目标标记" };
-
-  const { children } = await getDocChildren(start.root_id);
   const startIndex = children.findIndex((child) => child.id === start.id);
   const endIndex = children.findIndex((child) => child.id === end.id);
   if (startIndex < 0 || endIndex < 0 || startIndex >= endIndex) {
