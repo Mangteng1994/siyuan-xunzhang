@@ -2,7 +2,7 @@
   "name": "siyuan-xunzhang",
   "author": "Mangteng1994",
   "url": "https://github.com/Mangteng1994/siyuan-xunzhang",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "minAppVersion": "3.0.3",
   "disabledInPublish": true,
   "backends": [

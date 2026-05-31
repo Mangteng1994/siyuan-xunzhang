@@ -20,7 +20,7 @@ const MARK_ALIASES = {
   [MARK_END]: [MARK_END, "批量结束"],
   [MARK_TARGET]: [MARK_TARGET, "批量目标"],
 };
-const PLUGIN_VERSION = "0.3.4";
+const PLUGIN_VERSION = "0.3.5";
 const DEBUG_XUNZHANG = false;
 const HIGHLIGHT_CLASS = "siyuan-xunzhang-highlight";
 const ACTIVE_WND_CLASS = "layout__wnd--active";
@@ -91,6 +91,34 @@ async function getBlockRow(id) {
     LIMIT 1
   `);
   return rows[0] || null;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function markerStateList() {
+  return [MARK_START, MARK_END, MARK_TARGET];
+}
+
+async function readMarkerRef(marker, ref, fallbackId = "") {
+  const ids = uniq([ref?.id, fallbackId]).filter(isBlockId);
+  for (const id of ids) {
+    const row = await getBlockRow(id);
+    if (!row) continue;
+    const normalized = normalizeMarker(row.markdown || row.content);
+    if (normalized !== marker) continue;
+    return { ...row, marker: normalized };
+  }
+  return null;
+}
+
+async function resolveMarkerRefs(markerRefs = {}, markerBlockIds = {}) {
+  const resolved = {};
+  for (const marker of markerStateList()) {
+    resolved[marker] = await readMarkerRef(marker, markerRefs?.[marker], markerBlockIds?.[marker]);
+  }
+  return resolved;
 }
 
 async function queryMarkerRows(rootId) {
@@ -279,6 +307,31 @@ function describeActiveElement() {
   };
 }
 
+function getCurrentBlockElement(preferredPart) {
+  const selection = window.getSelection?.();
+  const nodes = [selection?.anchorNode, selection?.focusNode];
+  for (const node of nodes) {
+    const block = getElementFromNode(node)?.closest?.(".protyle-wysiwyg [data-node-id]");
+    if (block && (!preferredPart || preferredPart.contains(block))) return block;
+  }
+
+  const activeBlock = document.activeElement?.closest?.(".protyle-wysiwyg [data-node-id]");
+  if (activeBlock && (!preferredPart || preferredPart.contains(activeBlock))) return activeBlock;
+
+  const containers = [
+    preferredPart,
+    document.activeElement?.closest?.(".protyle"),
+    document.activeElement?.closest?.(".layout__wnd"),
+    document.querySelector(`.${ACTIVE_WND_CLASS}`),
+  ].filter((container, index, list) => container && list.indexOf(container) === index);
+
+  for (const container of containers) {
+    const selected = container.querySelector?.(".protyle-wysiwyg--select[data-node-id]");
+    if (selected) return selected;
+  }
+  return null;
+}
+
 function newBlockId() {
   if (globalThis.Lute?.NewNodeID) return globalThis.Lute.NewNodeID();
   const pad = (value) => String(value).padStart(2, "0");
@@ -338,6 +391,52 @@ async function getDocChildren(docId) {
   return { root, children };
 }
 
+async function inspectDocMarkers(docId) {
+  if (!isBlockId(docId)) {
+    return { docId, children: [], domChildren: [], domMarkers: [], sqlMarkers: [] };
+  }
+  const { children } = await getDocChildren(docId);
+  const domChildren = children.map((child) => markerDebugRowFromChild(child, docId));
+  return {
+    docId,
+    children,
+    domChildren,
+    domMarkers: domChildren.filter((row) => row.marker),
+    sqlMarkers: await queryMarkerRows(docId),
+  };
+}
+
+function findOrderedSourceMarkers(domMarkers, preferredStartId = "", preferredEndId = "") {
+  const findById = (marker, id) => domMarkers.find((row) => row.marker === marker && row.id === id) || null;
+  if (isBlockId(preferredStartId) && isBlockId(preferredEndId)) {
+    const start = findById(MARK_START, preferredStartId);
+    const end = findById(MARK_END, preferredEndId);
+    const startIndex = start ? domMarkers.findIndex((row) => row.id === start.id) : -1;
+    const endIndex = end ? domMarkers.findIndex((row) => row.id === end.id) : -1;
+    return { start, end, hasOrderedPair: startIndex >= 0 && endIndex > startIndex };
+  }
+  if (isBlockId(preferredStartId)) {
+    const start = findById(MARK_START, preferredStartId);
+    const startIndex = start ? domMarkers.findIndex((row) => row.id === start.id) : -1;
+    const end = startIndex >= 0 ? domMarkers.slice(startIndex + 1).find((row) => row.marker === MARK_END) || null : null;
+    return { start, end, hasOrderedPair: Boolean(start && end) };
+  }
+  if (isBlockId(preferredEndId)) {
+    const end = findById(MARK_END, preferredEndId);
+    const endIndex = end ? domMarkers.findIndex((row) => row.id === end.id) : -1;
+    const starts = endIndex >= 0 ? domMarkers.slice(0, endIndex).filter((row) => row.marker === MARK_START) : [];
+    const start = starts[starts.length - 1] || null;
+    return { start, end, hasOrderedPair: Boolean(start && end) };
+  }
+  const starts = domMarkers.filter((row) => row.marker === MARK_START);
+  for (const start of starts) {
+    const startIndex = domMarkers.findIndex((row) => row.id === start.id);
+    const end = domMarkers.slice(startIndex + 1).find((row) => row.marker === MARK_END);
+    if (end) return { start, end, hasOrderedPair: true };
+  }
+  return { start: starts[0] || null, end: null, hasOrderedPair: false };
+}
+
 function markerDebugRowFromChild(child, rootId) {
   const text = String(child?.element?.textContent || "");
   return {
@@ -365,117 +464,177 @@ function logMarkerDebug(scope, payload) {
   debugLog(scope, payload);
 }
 
-async function findMarkers(needsTarget, activeDocId) {
-  logMarkerDebug("findMarkers:input", { activeDocId, needsTarget });
-  if (!isBlockId(activeDocId)) {
-    logMarkerDebug("findMarkers:invalid-active-doc", { activeDocId, sqlMarkers: [], domMarkers: [] });
-    return { error: "未能识别当前文档，请先点击正文后再操作", sqlMarkers: [], domMarkers: [], children: [] };
+async function findMarkers(needsTarget, activeDocId, options = {}) {
+  const preferredRefs = await resolveMarkerRefs(options.markerRefs, options.markerBlockIds);
+  logMarkerDebug("findMarkers:input", { activeDocId, needsTarget, preferredRefs: markerDebugRows(Object.values(preferredRefs).filter(Boolean)) });
+
+  const preferredStart = preferredRefs[MARK_START];
+  const preferredEnd = preferredRefs[MARK_END];
+  const preferredTarget = preferredRefs[MARK_TARGET];
+
+  let sourceDocId = "";
+  if (preferredStart?.root_id && preferredEnd?.root_id) {
+    if (preferredStart.root_id !== preferredEnd.root_id) {
+      return {
+        error: "批量开始和批量结束必须在同一源文档",
+        preferredRefs,
+        sourceInspection: { docId: preferredStart.root_id, children: [], domChildren: [], domMarkers: [], sqlMarkers: [] },
+        targetInspection: { docId: preferredTarget?.root_id || "", children: [], domChildren: [], domMarkers: [], sqlMarkers: [] },
+      };
+    }
+    sourceDocId = preferredStart.root_id;
+  } else if (preferredStart?.root_id || preferredEnd?.root_id) {
+    sourceDocId = preferredStart?.root_id || preferredEnd?.root_id || "";
+  } else if (isBlockId(activeDocId)) {
+    sourceDocId = activeDocId;
+  } else if (!needsTarget || !preferredTarget?.root_id) {
+    logMarkerDebug("findMarkers:invalid-active-doc", { activeDocId, sqlMarkers: [], domMarkers: [], preferredRefs: markerDebugRows(Object.values(preferredRefs).filter(Boolean)) });
+    return {
+      error: "未能识别当前文档，请先点击正文后再操作",
+      preferredRefs,
+      sourceInspection: { docId: activeDocId, children: [], domChildren: [], domMarkers: [], sqlMarkers: [] },
+      targetInspection: { docId: "", children: [], domChildren: [], domMarkers: [], sqlMarkers: [] },
+    };
   }
-  const sqlMarkers = await queryMarkerRows(activeDocId);
-  const { children } = await getDocChildren(activeDocId);
-  const domChildren = children.map((child) => markerDebugRowFromChild(child, activeDocId));
-  const domMarkers = domChildren.filter((row) => row.marker);
+  if (!isBlockId(sourceDocId)) {
+    return {
+      error: "未能识别当前文档，请先点击正文后再操作",
+      preferredRefs,
+      sourceInspection: { docId: sourceDocId, children: [], domChildren: [], domMarkers: [], sqlMarkers: [] },
+      targetInspection: { docId: preferredTarget?.root_id || "", children: [], domChildren: [], domMarkers: [], sqlMarkers: [] },
+    };
+  }
+
+  const sourceInspection = await inspectDocMarkers(sourceDocId);
+  let targetInspection = { docId: "", children: [], domChildren: [], domMarkers: [], sqlMarkers: [] };
+  const sourceResult = findOrderedSourceMarkers(sourceInspection.domMarkers, preferredStart?.id || "", preferredEnd?.id || "");
+
+  if (needsTarget) {
+    const targetDocId = preferredTarget?.root_id || (isBlockId(activeDocId) ? activeDocId : sourceDocId);
+    targetInspection = targetDocId === sourceDocId ? sourceInspection : await inspectDocMarkers(targetDocId);
+  }
+
+  let target = null;
+  if (needsTarget) {
+    if (preferredTarget?.id) {
+      target = targetInspection.domMarkers.find((row) => row.marker === MARK_TARGET && row.id === preferredTarget.id) || null;
+    }
+    if (!target && !preferredTarget?.id && targetInspection.docId) {
+      target = targetInspection.domMarkers.find((row) => row.marker === MARK_TARGET) || null;
+    }
+    if (!target && isBlockId(activeDocId) && activeDocId !== targetInspection.docId) {
+      const fallbackTargetInspection = activeDocId === sourceDocId ? sourceInspection : await inspectDocMarkers(activeDocId);
+      target = fallbackTargetInspection.domMarkers.find((row) => row.marker === MARK_TARGET) || null;
+      if (target) targetInspection = fallbackTargetInspection;
+    }
+  }
+
   logMarkerDebug("findMarkers:candidates", {
     activeDocId,
-    sqlMarkerCount: sqlMarkers.length,
-    domChildrenCount: domChildren.length,
-    domMarkerCount: domMarkers.length,
-    sqlMarkers: markerDebugRows(sqlMarkers),
-    domChildren: markerDebugRows(domChildren),
-    domMarkers: markerDebugRows(domMarkers),
+    sourceDocId,
+    targetDocId: targetInspection.docId,
+    preferredRefs: markerDebugRows(Object.values(preferredRefs).filter(Boolean)),
+    sourceSqlMarkers: markerDebugRows(sourceInspection.sqlMarkers),
+    sourceDomChildren: markerDebugRows(sourceInspection.domChildren),
+    sourceDomMarkers: markerDebugRows(sourceInspection.domMarkers),
+    targetSqlMarkers: markerDebugRows(targetInspection.sqlMarkers),
+    targetDomChildren: markerDebugRows(targetInspection.domChildren),
+    targetDomMarkers: markerDebugRows(targetInspection.domMarkers),
   });
-  const starts = domMarkers.filter((row) => row.marker === MARK_START);
-  const ends = domMarkers.filter((row) => row.marker === MARK_END);
-  const target = domMarkers.find((row) => row.marker === MARK_TARGET);
 
-  for (const start of starts) {
-    const startIndex = domMarkers.findIndex((row) => row.id === start.id);
-    const end = domMarkers.slice(startIndex + 1).find((row) => row.marker === MARK_END && row.root_id === start.root_id);
-    if (!end) continue;
-    const result = { start, end, target: needsTarget ? target : null, children, sqlMarkers, domMarkers, hasOrderedPair: true };
-    logMarkerDebug("findMarkers:result", {
-      activeDocId,
-      start,
-      end,
-      target: needsTarget ? target : null,
-      ordered: true,
-      sqlMarkers: markerDebugRows(sqlMarkers),
-      domMarkers: markerDebugRows(domMarkers),
-    });
-    return result;
-  }
-
-  const result = { start: starts[0], end: null, target: needsTarget ? target : null, children, sqlMarkers, domMarkers, hasOrderedPair: false };
+  const result = {
+    start: sourceResult.start || null,
+    end: sourceResult.end || null,
+    target: needsTarget ? target : null,
+    hasOrderedPair: sourceResult.hasOrderedPair,
+    preferredRefs,
+    sourceInspection,
+    targetInspection,
+  };
   logMarkerDebug("findMarkers:result", {
     activeDocId,
-    start: result.start || null,
-    end: null,
-    target: needsTarget ? target || null : null,
-    ordered: false,
-    sqlMarkers: markerDebugRows(sqlMarkers),
-    domMarkers: markerDebugRows(domMarkers),
+    start: result.start,
+    end: result.end,
+    target: result.target,
+    ordered: result.hasOrderedPair,
+    sourceDocId,
+    targetDocId: targetInspection.docId,
   });
   return result;
 }
 
-async function buildMarkerPlan(needsTarget, activeDocId) {
+async function buildMarkerPlan(needsTarget, activeDocId, options = {}) {
   const {
     start,
     end,
     target,
-    children,
-    sqlMarkers,
-    domMarkers,
+    preferredRefs,
+    sourceInspection,
+    targetInspection,
     hasOrderedPair,
     error,
-  } = await findMarkers(needsTarget, activeDocId);
+  } = await findMarkers(needsTarget, activeDocId, options);
   logMarkerDebug("buildMarkerPlan:input", {
     activeDocId,
     needsTarget,
     start: start || null,
     end: end || null,
     target: target || null,
-    sqlMarkers: markerDebugRows(sqlMarkers || []),
-    domMarkers: markerDebugRows(domMarkers || []),
+    preferredRefs: markerDebugRows(Object.values(preferredRefs || {}).filter(Boolean)),
+    sourceSqlMarkers: markerDebugRows(sourceInspection?.sqlMarkers || []),
+    sourceDomMarkers: markerDebugRows(sourceInspection?.domMarkers || []),
+    targetSqlMarkers: markerDebugRows(targetInspection?.sqlMarkers || []),
+    targetDomMarkers: markerDebugRows(targetInspection?.domMarkers || []),
   });
   if (error) return { error };
-  const sqlStarts = sqlMarkers.filter((row) => row.marker === MARK_START);
-  const sqlEnds = sqlMarkers.filter((row) => row.marker === MARK_END);
-  const sqlTargets = sqlMarkers.filter((row) => row.marker === MARK_TARGET);
-  const domStarts = domMarkers.filter((row) => row.marker === MARK_START);
-  const domEnds = domMarkers.filter((row) => row.marker === MARK_END);
+  const sourceChildren = sourceInspection?.children || [];
+  const targetChildren = targetInspection?.children || [];
+  const sourceSqlMarkers = sourceInspection?.sqlMarkers || [];
+  const sourceDomMarkers = sourceInspection?.domMarkers || [];
+  const targetSqlMarkers = targetInspection?.sqlMarkers || [];
+  const targetDomMarkers = targetInspection?.domMarkers || [];
+  const sqlStarts = sourceSqlMarkers.filter((row) => row.marker === MARK_START);
+  const sqlEnds = sourceSqlMarkers.filter((row) => row.marker === MARK_END);
+  const sqlTargets = targetSqlMarkers.filter((row) => row.marker === MARK_TARGET);
+  const domStarts = sourceDomMarkers.filter((row) => row.marker === MARK_START);
+  const domEnds = sourceDomMarkers.filter((row) => row.marker === MARK_END);
 
   if (!domStarts.length) {
-    return { error: sqlStarts.length ? "标记必须放在当前文档顶层独立段落中" : "当前文档没有开始标记" };
+    return { error: sqlStarts.length ? "标记必须放在当前文档顶层独立段落中" : "未找到源文档中的完整开始/结束标记" };
   }
   if (!domEnds.length) {
-    return { error: sqlEnds.length ? "标记必须放在当前文档顶层独立段落中" : "当前文档没有结束标记" };
+    return { error: sqlEnds.length ? "标记必须放在当前文档顶层独立段落中" : "未找到源文档中的完整开始/结束标记" };
   }
   if (!hasOrderedPair || !start?.id || !end?.id) {
     return { error: `${markerLabel(MARK_START)}/${markerLabel(MARK_END)} 顺序错误，开始标记必须在结束标记之前` };
   }
-  if (start.root_id !== end.root_id) return { error: `${markerLabel(MARK_START)} ${markerLabel(MARK_END)} must be in the same doc` };
+  if (start.root_id !== end.root_id) return { error: "批量开始和批量结束必须在同一源文档" };
   if (needsTarget && !target?.id) {
-    return { error: sqlTargets.length ? "标记必须放在当前文档顶层独立段落中" : "当前文档未找到批量目标，请先在当前文档中插入目标标记" };
+    return { error: sqlTargets.length ? "标记必须放在当前文档顶层独立段落中" : "未找到目标标记，请在目标位置空行插入批量目标" };
   }
-  const startIndex = children.findIndex((child) => child.id === start.id);
-  const endIndex = children.findIndex((child) => child.id === end.id);
+  const startIndex = sourceChildren.findIndex((child) => child.id === start.id);
+  const endIndex = sourceChildren.findIndex((child) => child.id === end.id);
   if (startIndex < 0 || endIndex < 0 || startIndex >= endIndex) {
-    return { error: `${markerLabel(MARK_START)}/${markerLabel(MARK_END)} 顺序错误，开始标记必须在结束标记之前` };
+    return {
+      error: sourceSqlMarkers.some((row) => row.id === start?.id || row.id === end?.id)
+        ? "标记必须放在当前文档顶层独立段落中"
+        : `${markerLabel(MARK_START)}/${markerLabel(MARK_END)} 顺序错误，开始标记必须在结束标记之前`,
+    };
   }
 
-  const content = children.slice(startIndex + 1, endIndex);
+  const content = sourceChildren.slice(startIndex + 1, endIndex);
   if (content.length === 0) return { error: `${markerLabel(MARK_START)} 到 ${markerLabel(MARK_END)} 之间没有可处理内容块` };
 
   const sourceDeletedIds = new Set([start.id, end.id, ...content.map((item) => item.id)]);
+  const sourceAnchorExcludedIds = target?.root_id === start.root_id ? new Set([...sourceDeletedIds, target?.id].filter(Boolean)) : sourceDeletedIds;
   let targetBlock = null;
   let targetAnchor = null;
   if (needsTarget && target?.id) {
-    const targetDoc = { children };
-    const targetIndex = targetDoc.children.findIndex((child) => child.id === target.id);
-    if (targetIndex < 0) return { error: "标记必须放在当前文档顶层独立段落中" };
-    targetBlock = targetDoc.children[targetIndex];
-    targetAnchor = anchorAt(targetDoc.children, targetIndex, target.root_id, new Set([...sourceDeletedIds, target.id]));
+    const targetIndex = targetChildren.findIndex((child) => child.id === target.id);
+    if (targetIndex < 0) return { error: targetSqlMarkers.some((row) => row.id === target.id) ? "标记必须放在当前文档顶层独立段落中" : "未找到目标标记，请在目标位置空行插入批量目标" };
+    targetBlock = targetChildren[targetIndex];
+    const targetExcludedIds = target.root_id === start.root_id ? new Set([...sourceDeletedIds, target.id]) : new Set([target.id]);
+    targetAnchor = anchorAt(targetChildren, targetIndex, target.root_id, targetExcludedIds);
   }
 
   return {
@@ -483,11 +642,12 @@ async function buildMarkerPlan(needsTarget, activeDocId) {
     endId: end.id,
     targetId: needsTarget ? target.id : "",
     sourceRootId: start.root_id,
-    startBlock: children[startIndex],
-    endBlock: children[endIndex],
-    sourceRangeAnchor: anchorAt(children, startIndex, start.root_id, sourceDeletedIds),
-    startAnchor: anchorAt(children, startIndex, start.root_id, new Set([start.id, end.id, target?.id].filter(Boolean))),
-    endAnchor: anchorAt(children, endIndex, start.root_id, new Set([start.id, end.id, target?.id].filter(Boolean))),
+    targetRootId: target?.root_id || "",
+    startBlock: sourceChildren[startIndex],
+    endBlock: sourceChildren[endIndex],
+    sourceRangeAnchor: anchorAt(sourceChildren, startIndex, start.root_id, sourceAnchorExcludedIds),
+    startAnchor: anchorAt(sourceChildren, startIndex, start.root_id, sourceAnchorExcludedIds),
+    endAnchor: anchorAt(sourceChildren, endIndex, start.root_id, sourceAnchorExcludedIds),
     targetBlock,
     targetAnchor,
     content,
@@ -513,6 +673,7 @@ class XunzhangPlugin extends Plugin {
     this.lastActiveBlockId = "";
     this.lastMarkerRootId = "";
     this.lastMarkerBlockIds = {};
+    this.lastMarkerRefs = {};
     this.batchUndoStack = [];
     this.activeObserver = null;
     this.onKeyDown = this.onKeyDown.bind(this);
@@ -656,6 +817,17 @@ class XunzhangPlugin extends Plugin {
       return activeBlock.root_id;
     }
 
+    const markerRefRootId = markerStateList().map((marker) => this.lastMarkerRefs?.[marker]?.rootId).find(isBlockId) || "";
+    if (isBlockId(markerRefRootId)) {
+      debugLog("resolveCurrentDocId", {
+        source: "lastMarkerRefs.rootId",
+        activeDocId: markerRefRootId,
+        activeBlockId,
+        lastActiveBlockId: this.lastActiveBlockId,
+      });
+      return markerRefRootId;
+    }
+
     if (isBlockId(this.lastMarkerRootId)) {
       debugLog("resolveCurrentDocId", {
         source: "lastMarkerRootId",
@@ -687,6 +859,18 @@ class XunzhangPlugin extends Plugin {
       lastMarkerRootId: this.lastMarkerRootId,
     });
     return activeDocId || "";
+  }
+
+  clearMarkerRefs(ids = []) {
+    const deletedIds = new Set(ids.filter(isBlockId));
+    if (!deletedIds.size) return;
+    for (const marker of markerStateList()) {
+      if (deletedIds.has(this.lastMarkerBlockIds?.[marker])) delete this.lastMarkerBlockIds[marker];
+      if (deletedIds.has(this.lastMarkerRefs?.[marker]?.id)) delete this.lastMarkerRefs[marker];
+    }
+    const remainingRootId = markerStateList().map((marker) => this.lastMarkerRefs?.[marker]?.rootId).find(isBlockId) || "";
+    if (!remainingRootId && !markerStateList().some((marker) => isBlockId(this.lastMarkerBlockIds?.[marker]))) this.lastMarkerRootId = "";
+    else if (remainingRootId) this.lastMarkerRootId = remainingRootId;
   }
 
   async logOperationContext(operation, activeDocId) {
@@ -801,21 +985,33 @@ class XunzhangPlugin extends Plugin {
     const text = MARK_ALIASES[marker]?.[1] || marker;
     try {
       this.rememberActiveBlock();
-      const blockId = getActiveBlockId(this.lastActivePart, this.lastActiveBlockId);
-      if (!blockId) {
+      let blockId = "";
+      let block = null;
+      let currentBlock = null;
+      let isDomEmpty = false;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        currentBlock = getCurrentBlockElement(this.lastActivePart);
+        blockId = currentBlock?.getAttribute?.("data-node-id") || getActiveBlockId(this.lastActivePart, attempt >= 2 ? this.lastActiveBlockId : "");
+        if (!isBlockId(blockId)) {
+          if (attempt < 4) await wait(60);
+          continue;
+        }
+        block = await getBlockRow(blockId);
+        isDomEmpty = cleanMarkerText(currentBlock?.textContent) === "";
+        const isParagraph = !block || block.type === "p";
+        const isSqlEmpty = cleanMarkerText(block?.markdown || block?.content) === "";
+        if (isParagraph && (isSqlEmpty || isDomEmpty)) break;
+        if (attempt < 4) await wait(60);
+      }
+      if (!isBlockId(blockId)) {
         notify("未找到当前光标所在块", true, 3500);
         return;
       }
-
-      const rows = await sql(`
-        SELECT id, root_id, type, content, markdown
-        FROM blocks
-        WHERE id = '${escapeSql(blockId)}'
-        LIMIT 1
-      `);
-      const block = rows[0];
-      const visibleText = String(block?.markdown || block?.content || "").replace(/[\s\u00a0\u200b]/g, "");
-      if (!block || block.type !== "p" || visibleText !== "") {
+      if ((!block || block.type !== "p") && !isDomEmpty) {
+        notify("请先在目标位置新建空行，再插入标记", true, 3500);
+        return;
+      }
+      if (block && block.type === "p" && cleanMarkerText(block.markdown || block.content) !== "" && !isDomEmpty) {
         notify("请先在目标位置新建空行，再插入标记", true, 3500);
         return;
       }
@@ -832,11 +1028,17 @@ class XunzhangPlugin extends Plugin {
         dataType: "markdown",
         data: text,
       });
-      this.lastMarkerRootId = block.root_id || "";
+      const insertedBlock = (await getBlockRow(blockId)) || block;
+      this.lastActiveBlockId = blockId;
+      this.lastMarkerRootId = insertedBlock?.root_id || block?.root_id || "";
       this.lastMarkerBlockIds[marker] = blockId;
+      this.lastMarkerRefs[marker] = {
+        id: blockId,
+        rootId: insertedBlock?.root_id || block?.root_id || "",
+      };
       const undoOperations = [{ action: "update", id: blockId, data: oldDom }];
       this.pushBatchUndo("插入标记", undoOperations);
-      await api("/api/sqlite/flushTransaction", {}).catch(() => null);
+      api("/api/sqlite/flushTransaction", {}).catch(() => null);
       notify(`已插入标记：${text}`, false, 2500);
     } catch (error) {
       console.error("[siyuan-xunzhang] insertMarkerBlock failed", error);
@@ -921,7 +1123,7 @@ class XunzhangPlugin extends Plugin {
         notify("批量删除正在检查数据...", false, 1600);
         const activeDocId = await this.resolveCurrentDocId();
         await this.logOperationContext("delete", activeDocId);
-        const plan = await buildMarkerPlan(false, activeDocId);
+        const plan = await buildMarkerPlan(false, activeDocId, { markerRefs: this.lastMarkerRefs, markerBlockIds: this.lastMarkerBlockIds });
         if (plan.error) {
           notify(plan.error, true, 4000);
           return;
@@ -936,6 +1138,7 @@ class XunzhangPlugin extends Plugin {
         const deletedDoms = [plan.startBlock, ...plan.content, plan.endBlock].map(blockDom);
         const undoOperations = transInsertBlocksAt(deletedDoms, plan.sourceRangeAnchor);
         await this.runPluginUndoableTransaction("批量删除", transDeleteBlocks(deletedIds), undoOperations);
+        this.clearMarkerRefs([plan.startId, plan.endId]);
         await api("/api/sqlite/flushTransaction", {}).catch(() => null);
         notify(`批量删除完成：${plan.content.length} 个内容块`, false, 3000);
       } catch (error) {
@@ -951,7 +1154,7 @@ class XunzhangPlugin extends Plugin {
         notify("批量移动正在检查数据...", false, 1600);
         const activeDocId = await this.resolveCurrentDocId();
         await this.logOperationContext("move", activeDocId);
-        const plan = await buildMarkerPlan(true, activeDocId);
+        const plan = await buildMarkerPlan(true, activeDocId, { markerRefs: this.lastMarkerRefs, markerBlockIds: this.lastMarkerBlockIds });
         if (plan.error) {
           notify(plan.error, true, 4000);
           return;
@@ -978,6 +1181,7 @@ class XunzhangPlugin extends Plugin {
           transInsertBlockAt(blockDom(plan.targetBlock), plan.targetAnchor),
         ];
         await this.runPluginUndoableTransaction("批量移动", operations, undoOperations);
+        this.clearMarkerRefs([plan.startId, plan.endId, plan.targetId]);
         await api("/api/sqlite/flushTransaction", {}).catch(() => null);
         await this.openBlock(contentIds[0]);
         notify(`批量移动完成：${contentIds.length} 个内容块`, false, 3000);
@@ -994,7 +1198,7 @@ class XunzhangPlugin extends Plugin {
         notify("批量复制正在检查数据...", false, 1600);
         const activeDocId = await this.resolveCurrentDocId();
         await this.logOperationContext("copy", activeDocId);
-        const plan = await buildMarkerPlan(true, activeDocId);
+        const plan = await buildMarkerPlan(true, activeDocId, { markerRefs: this.lastMarkerRefs, markerBlockIds: this.lastMarkerBlockIds });
         if (plan.error) {
           notify(plan.error, true, 4000);
           return;
@@ -1017,6 +1221,7 @@ class XunzhangPlugin extends Plugin {
           transInsertBlockAt(blockDom(plan.targetBlock), plan.targetAnchor),
         ];
         await this.runPluginUndoableTransaction("批量复制", operations, undoOperations);
+        this.clearMarkerRefs([plan.startId, plan.endId, plan.targetId]);
         await api("/api/sqlite/flushTransaction", {}).catch(() => null);
         notify(`批量复制完成：${plan.content.length} 个内容块`, false, 3000);
       } catch (error) {
