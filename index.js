@@ -365,6 +365,14 @@ function blockDom(item) {
   return item?.element?.outerHTML || "";
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function normalizeClipboardText(text) {
   return String(text || "")
     .replace(/\r\n/g, "\n")
@@ -379,13 +387,90 @@ function blocksToPlainText(blocks) {
   return blocks
     .map((item) => normalizeClipboardText(item?.element?.innerText || item?.element?.textContent || ""))
     .filter(Boolean)
-    .join("\n");
+    .join("\n\n");
 }
 
-async function writeClipboardText(text) {
-  if (!text) throw new Error("没有可复制的内容");
-  if (!navigator.clipboard?.writeText) throw new Error("剪切板 API 不可用");
-  await navigator.clipboard.writeText(text);
+function detectListLines(text) {
+  const lines = normalizeClipboardText(text).split("\n").map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return null;
+
+  const ordered = lines.every((line) => /^\d+[.)]\s+/.test(line));
+  if (ordered) {
+    return {
+      tag: "ol",
+      items: lines.map((line) => line.replace(/^\d+[.)]\s+/, "")),
+    };
+  }
+
+  const unordered = lines.every((line) => /^[-*]\s+/.test(line));
+  if (unordered) {
+    return {
+      tag: "ul",
+      items: lines.map((line) => line.replace(/^[-*]\s+/, "")),
+    };
+  }
+
+  return null;
+}
+
+function blocksToClipboardHtml(blocks) {
+  const parts = [];
+  let pendingList = null;
+
+  const flushList = () => {
+    if (!pendingList) return;
+    parts.push(`<${pendingList.tag}>${pendingList.items.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</${pendingList.tag}>`);
+    pendingList = null;
+  };
+
+  for (const item of blocks) {
+    const text = normalizeClipboardText(item?.element?.innerText || item?.element?.textContent || "");
+    if (!text) continue;
+
+    const list = detectListLines(text);
+    if (list) {
+      if (!pendingList || pendingList.tag !== list.tag) {
+        flushList();
+        pendingList = { tag: list.tag, items: [] };
+      }
+      pendingList.items.push(...list.items);
+      continue;
+    }
+
+    flushList();
+    const paragraphs = text.split(/\n{2,}/).map((value) => value.trim()).filter(Boolean);
+    for (const paragraph of paragraphs) {
+      parts.push(`<p>${escapeHtml(paragraph).replace(/\n/g, "<br>")}</p>`);
+    }
+  }
+
+  flushList();
+  return parts.join("");
+}
+
+async function writeClipboardData(html, text) {
+  if (!html && !text) throw new Error("没有可复制的内容");
+
+  if (navigator.clipboard?.write && globalThis.ClipboardItem && globalThis.Blob) {
+    try {
+      await navigator.clipboard.write([
+        new globalThis.ClipboardItem({
+          "text/html": new globalThis.Blob([html || escapeHtml(text)], { type: "text/html" }),
+          "text/plain": new globalThis.Blob([text], { type: "text/plain" }),
+        }),
+      ]);
+      return "html";
+    } catch (error) {
+      debugLog("writeClipboardData:fallback", { message: error?.message || String(error) });
+    }
+  }
+
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return "text";
+  }
+
+  throw new Error("剪切板 API 不可用");
 }
 
 function anchorAt(children, index, parentID, excludedIds = new Set()) {
@@ -1284,9 +1369,16 @@ class XunzhangPlugin extends Plugin {
           return;
         }
 
+        const html = blocksToClipboardHtml(plan.content);
         const text = blocksToPlainText(plan.content);
-        await writeClipboardText(text);
-        notify(`已复制到剪切板：${plan.content.length} 个内容块`, false, 3000);
+        const mode = await writeClipboardData(html, text);
+        notify(
+          mode === "html"
+            ? `已复制到剪切板：${plan.content.length} 个内容块`
+            : `已复制为纯文本：${plan.content.length} 个内容块`,
+          false,
+          3000,
+        );
       } catch (error) {
         console.error("[siyuan-xunzhang] copyMarkedRangeToClipboard failed", error);
         notify(`复制到剪切板失败：${error.message || error}`, true, 5000);
