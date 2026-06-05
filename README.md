@@ -12,6 +12,7 @@ The idea comes from [IAliceBobI/sy-tomato-plugin](https://github.com/IAliceBobI/
 - `Alt+Shift+;`: delete continuous blocks between the start and end markers
 - `Alt+Shift+'`: move continuous blocks between the start and end markers to the target marker
 - `Alt+Shift+Q`: copy continuous blocks between the start and end markers to the target marker
+- `Alt+Shift+C`: copy continuous blocks between the start and end markers to the system clipboard
 - Right-click the top bar icon to open the locate, marker insertion, undo fallback, and batch operation menu
 
 ## Markers
@@ -43,7 +44,12 @@ Move or copy a continuous range:
 3. Run move from the menu, or press `Alt+Shift+'`.
 4. Run copy from the menu, or press `Alt+Shift+Q`.
 
-Marker lines are removed after each operation.
+Copy a continuous range to the clipboard:
+
+1. Insert the start and end markers as above.
+2. Run "Copy: start-end to clipboard" from the menu, or press `Alt+Shift+C`.
+
+Delete, move, and copy-to-target remove marker lines after each operation. Copy-to-clipboard does not need `批量目标`, does not remove markers, and does not modify the document.
 
 ## Undo
 
@@ -54,6 +60,12 @@ Xunzhang does not intercept `Ctrl+Z` / `Cmd+Z`. Native editor undo remains handl
 The undo stack only records new operations performed while the plugin is loaded. Operations performed before a reload or restart cannot be restored automatically.
 
 ## Changelog
+
+### v0.3.6
+
+- Add `Alt+Shift+C` to copy continuous blocks between `批量开始` and `批量结束` to the system clipboard.
+- Prefer writing `text/html` plus `text/plain` to the clipboard, with plain-text fallback when HTML clipboard is unavailable.
+- Clipboard copy does not need `批量目标`, does not remove markers, and does not modify the document.
 
 ### v0.3.5
 
