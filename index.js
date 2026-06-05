@@ -365,37 +365,27 @@ function blockDom(item) {
   return item?.element?.outerHTML || "";
 }
 
-function blocksToClipboardHtml(blocks) {
-  return blocks.map((item) => (item?.element ? cloneBlockElement(item.element).dom : "")).join("");
+function normalizeClipboardText(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/^\s*(\d+[.)])\s*\n+\s*/gm, "$1 ")
+    .replace(/^\s*([*-])\s*\n+\s*/gm, "$1 ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function blocksToPlainText(blocks) {
-  return blocks.map((item) => String(item?.element?.textContent || "")).join("\n");
+  return blocks
+    .map((item) => normalizeClipboardText(item?.element?.innerText || item?.element?.textContent || ""))
+    .filter(Boolean)
+    .join("\n");
 }
 
-async function writeClipboardData(html, text) {
-  const clipboard = navigator.clipboard;
-  if (!clipboard) throw new Error("剪切板 API 不可用");
-
-  if (typeof clipboard.write === "function" && typeof globalThis.ClipboardItem === "function" && typeof globalThis.Blob === "function") {
-    try {
-      await clipboard.write([
-        new globalThis.ClipboardItem({
-          "text/html": new globalThis.Blob([html], { type: "text/html" }),
-          "text/plain": new globalThis.Blob([text], { type: "text/plain" }),
-        }),
-      ]);
-      return "html";
-    } catch (error) {
-      debugLog("writeClipboardData:html-fallback", { message: error?.message || String(error) });
-    }
-  }
-
-  if (typeof clipboard.writeText === "function") {
-    await clipboard.writeText(text);
-    return "text";
-  }
-  throw new Error("剪切板 API 不可用");
+async function writeClipboardText(text) {
+  if (!text) throw new Error("没有可复制的内容");
+  if (!navigator.clipboard?.writeText) throw new Error("剪切板 API 不可用");
+  await navigator.clipboard.writeText(text);
 }
 
 function anchorAt(children, index, parentID, excludedIds = new Set()) {
@@ -1294,16 +1284,9 @@ class XunzhangPlugin extends Plugin {
           return;
         }
 
-        const html = blocksToClipboardHtml(plan.content);
         const text = blocksToPlainText(plan.content);
-        const mode = await writeClipboardData(html, text);
-        notify(
-          mode === "html"
-            ? `已复制到剪切板：${plan.content.length} 个内容块`
-            : `已复制为纯文本：${plan.content.length} 个内容块`,
-          false,
-          3000,
-        );
+        await writeClipboardText(text);
+        notify(`已复制到剪切板：${plan.content.length} 个内容块`, false, 3000);
       } catch (error) {
         console.error("[siyuan-xunzhang] copyMarkedRangeToClipboard failed", error);
         notify(`复制到剪切板失败：${error.message || error}`, true, 5000);
