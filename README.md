@@ -61,33 +61,9 @@ The undo stack only records new operations performed while the plugin is loaded.
 
 ## Changelog
 
-### v0.3.6
+### v0.3.7
 
 - Add `Alt+Shift+C` to copy continuous blocks between `批量开始` and `批量结束` to the system clipboard.
-- Prefer writing `text/html` plus `text/plain` to the clipboard, with plain-text fallback when HTML clipboard is unavailable.
-- Preserve paragraph breaks, ordered lists, unordered lists, and heading levels when copying to the clipboard.
+- Copy Markdown text to the clipboard, with `text/plain` fallback when `text/markdown` is unavailable.
+- Preserve paragraph breaks, ordered lists, unordered lists, task lists, tables, images, heading levels, blockquotes, code blocks, and math blocks as Markdown where possible.
 - Clipboard copy does not need `批量目标`, does not remove markers, and does not modify the document.
-
-### v0.3.5
-
-- Support moving and copying marked ranges across documents when the start/end markers are in the source document and the target marker is in another document.
-- Prefer the latest markers inserted by Xunzhang itself to reduce accidental matches from older marker history.
-- Improve marker insertion on newly created empty paragraphs by preferring the current DOM block and retrying briefly while SiYuan syncs block state.
-- Stop awaiting `flushTransaction` after marker insertion so the top bar context menu remains responsive for consecutive marker insertion.
-
-### v0.3.4
-
-- Keep plugin undo strictly inside Xunzhang's own menu-driven undo stack.
-- Remove the unreliable native `protyle.undo` integration from v0.3.3.
-- Keep `Ctrl+Z` / `Cmd+Z` fully handled by SiYuan.
-- Rebuild `package.zip` for marketplace update detection.
-
-### v0.3.3
-
-- Keep `Ctrl+Z` / `Cmd+Z` fully handled by SiYuan. Xunzhang no longer globally intercepts editor undo shortcuts.
-- Keep a plugin-level undo stack for marker insertion, batch delete, batch move, and batch copy. The top bar context menu undo item is the only Xunzhang undo entry.
-- Limit batch operations to markers in the current open document to avoid registering undo history on the wrong document.
-- Change marker insertion to update the current empty paragraph only. It no longer creates a new paragraph before or after the current block.
-- Reject marker insertion in non-empty paragraphs with a prompt to create an empty line first.
-- Fix marker insertion so it uses SiYuan's block update API and valid DOM undo data, avoiding abnormal block structure and broken context menus.
-- Remove the "marker help" menu item while keeping legacy marker compatibility for `aacc1`, `aacc2`, and `aacc3`.

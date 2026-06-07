@@ -20,7 +20,7 @@ const MARK_ALIASES = {
   [MARK_END]: [MARK_END, "批量结束"],
   [MARK_TARGET]: [MARK_TARGET, "批量目标"],
 };
-const PLUGIN_VERSION = "0.3.6";
+const PLUGIN_VERSION = "0.3.7";
 const DEBUG_XUNZHANG = false;
 const HIGHLIGHT_CLASS = "siyuan-xunzhang-highlight";
 const ACTIVE_WND_CLASS = "layout__wnd--active";
@@ -365,14 +365,6 @@ function blockDom(item) {
   return item?.element?.outerHTML || "";
 }
 
-function escapeHtml(value) {
-  return String(value || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
 function normalizeClipboardText(text) {
   return String(text || "")
     .replace(/\r\n/g, "\n")
@@ -391,6 +383,10 @@ function nodeSubtypeOf(element) {
   return element?.getAttribute?.("data-subtype") || element?.dataset?.subtype || "";
 }
 
+function attrOf(element, name) {
+  return String(element?.getAttribute?.(name) || "").trim();
+}
+
 function removeClipboardNoise(element) {
   element.querySelectorAll(".protyle-action, .protyle-attr, .protyle-icons, .fn__none").forEach((node) => node.remove());
   element.querySelectorAll('[contenteditable="false"]').forEach((node) => node.remove());
@@ -406,16 +402,29 @@ function cleanElementText(element, options = {}) {
   return normalizeClipboardText(clone.innerText || clone.textContent || "");
 }
 
-function htmlText(text) {
-  return escapeHtml(text).replace(/\n/g, "<br>");
-}
-
 function directChildrenByType(element, type) {
   return Array.from(element?.children || []).filter((child) => nodeTypeOf(child) === type);
 }
 
+function classTextOf(element) {
+  const className = element?.className || element?.getAttribute?.("class") || "";
+  return typeof className === "string" ? className : "";
+}
+
 function listTagFromElement(element) {
   return nodeSubtypeOf(element) === "o" ? "ol" : "ul";
+}
+
+function isTaskListElement(element) {
+  return nodeSubtypeOf(element) === "t" || classTextOf(element).includes("protyle-task");
+}
+
+function isDoneTaskItem(element) {
+  const className = classTextOf(element);
+  return className.includes("protyle-task--done")
+    || element?.querySelector?.(".protyle-task--done")
+    || element?.querySelector?.('[checked="true"]')
+    || element?.querySelector?.('[aria-checked="true"]');
 }
 
 function headingLevelOf(element) {
@@ -423,16 +432,71 @@ function headingLevelOf(element) {
   return match ? Number(match[0]) : 1;
 }
 
+function quoteMarkdown(text) {
+  return normalizeClipboardText(text)
+    .split("\n")
+    .map((line) => (line ? `> ${line}` : ">"))
+    .join("\n");
+}
+
+function fencedMarkdown(text) {
+  const value = String(text || "").replace(/\r\n/g, "\n").trimEnd();
+  const longestFence = Math.max(2, ...Array.from(value.matchAll(/`+/g)).map((match) => match[0].length));
+  const fence = "`".repeat(longestFence + 1);
+  return `${fence}\n${value}\n${fence}`;
+}
+
+function markdownImageUrl(src) {
+  const value = String(src || "").trim();
+  if (!value) return "";
+  return /[\s()]/.test(value) ? `<${value.replace(/>/g, "%3E")}>` : value;
+}
+
+function markdownImageAlt(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/\]/g, "\\]").replace(/\n+/g, " ").trim();
+}
+
+function imageSrcOf(element) {
+  const ownSrc = attrOf(element, "data-src")
+    || attrOf(element, "data-original")
+    || attrOf(element, "src")
+    || attrOf(element, "data-href");
+  if (ownSrc) return ownSrc;
+
+  const image = element?.matches?.("img") ? element : element?.querySelector?.("img");
+  if (!image) return "";
+  return attrOf(image, "data-src")
+    || attrOf(image, "data-original")
+    || attrOf(image, "src")
+    || attrOf(image, "data-href");
+}
+
+function imageMarkdowns(element) {
+  const images = Array.from(element?.querySelectorAll?.("img, [data-src], [data-href]") || []);
+  if (imageSrcOf(element)) images.unshift(element);
+  const seen = new Set();
+  return images
+    .map((image) => {
+      const src = imageSrcOf(image);
+      if (!src || seen.has(src)) return "";
+      seen.add(src);
+      const alt = markdownImageAlt(attrOf(image, "alt") || attrOf(image, "title") || attrOf(image, "aria-label"));
+      return `![${alt}](${markdownImageUrl(src)})`;
+    })
+    .filter(Boolean);
+}
+
 function listElementToPlainText(element, depth = 0) {
   const items = directChildrenByType(element, "NodeListItem");
   if (!items.length) return cleanElementText(element);
   const ordered = listTagFromElement(element) === "ol";
+  const task = isTaskListElement(element);
   const indent = "  ".repeat(depth);
   const lines = [];
 
   items.forEach((item, index) => {
     const text = cleanElementText(item, { excludeNestedLists: true });
-    const prefix = ordered ? `${index + 1}.` : "-";
+    const prefix = task ? `- [${isDoneTaskItem(item) ? "x" : " "}]` : ordered ? `${index + 1}.` : "-";
     lines.push(`${indent}${prefix}${text ? ` ${text.replace(/\n/g, `\n${indent}  `)}` : ""}`);
     for (const nested of directChildrenByType(item, "NodeList")) {
       const nestedText = listElementToPlainText(nested, depth + 1);
@@ -443,109 +507,81 @@ function listElementToPlainText(element, depth = 0) {
   return lines.join("\n");
 }
 
-function blocksToPlainText(blocks) {
+function tableCellMarkdown(cell) {
+  return cleanElementText(cell)
+    .replace(/\|/g, "\\|")
+    .replace(/\n+/g, "<br>")
+    .trim();
+}
+
+function tableElementToMarkdown(element) {
+  const table = element?.matches?.("table") ? element : element?.querySelector?.("table") || element;
+  const rows = Array.from(table?.querySelectorAll?.("tr") || []);
+  const matrix = rows
+    .map((row) => Array.from(row.querySelectorAll?.("th, td") || []).map(tableCellMarkdown))
+    .filter((cells) => cells.length);
+  if (!matrix.length) return cleanElementText(element);
+
+  const width = Math.max(...matrix.map((cells) => cells.length));
+  const normalized = matrix.map((cells) => {
+    const row = cells.slice();
+    while (row.length < width) row.push("");
+    return row;
+  });
+  const header = normalized[0];
+  const separator = header.map(() => "---");
+  const body = normalized.slice(1);
+  return [header, separator, ...body]
+    .map((cells) => `| ${cells.join(" | ")} |`)
+    .join("\n");
+}
+
+function blockToMarkdown(element) {
+  const type = nodeTypeOf(element);
+  if (type === "NodeThematicBreak") return "---";
+  if (type === "NodeTable") return tableElementToMarkdown(element);
+
+  const images = imageMarkdowns(element);
+  const text = cleanElementText(element);
+  if (!text && images.length) return images.join("\n");
+  if (!text) return "";
+
+  if (type === "NodeList") return listElementToPlainText(element);
+  if (type === "NodeHeading") return `${"#".repeat(headingLevelOf(element))} ${text}`;
+  if (type === "NodeBlockquote") return quoteMarkdown(text);
+  if (type === "NodeCodeBlock") return fencedMarkdown(text);
+  if (type === "NodeMathBlock") return `$$\n${text}\n$$`;
+  if (images.length) return [text, ...images].join("\n");
+
+  return text;
+}
+
+function blocksToMarkdown(blocks) {
   return blocks
-    .map((item) => {
-      const element = item?.element;
-      if (nodeTypeOf(element) === "NodeList") return listElementToPlainText(element);
-      if (nodeTypeOf(element) === "NodeHeading") {
-        const text = cleanElementText(element);
-        return text ? `${"#".repeat(headingLevelOf(element))} ${text}` : "";
-      }
-      return cleanElementText(element);
-    })
+    .map((item) => blockToMarkdown(item?.element))
     .filter(Boolean)
     .join("\n\n");
 }
 
-function detectListLines(text) {
-  const lines = normalizeClipboardText(text).split("\n").map((line) => line.trim()).filter(Boolean);
-  if (!lines.length) return null;
-
-  const ordered = lines.every((line) => /^\d+[.)]\s+/.test(line));
-  if (ordered) {
-    return {
-      tag: "ol",
-      items: lines.map((line) => line.replace(/^\d+[.)]\s+/, "")),
-    };
-  }
-
-  const unordered = lines.every((line) => /^[-*]\s+/.test(line));
-  if (unordered) {
-    return {
-      tag: "ul",
-      items: lines.map((line) => line.replace(/^[-*]\s+/, "")),
-    };
-  }
-
-  return null;
-}
-
-function listElementToHtml(element) {
-  const items = directChildrenByType(element, "NodeListItem");
-  if (!items.length) {
-    const list = detectListLines(cleanElementText(element));
-    if (!list) return "";
-    return `<${list.tag}>${list.items.map((value) => `<li>${htmlText(value)}</li>`).join("")}</${list.tag}>`;
-  }
-
-  const tag = listTagFromElement(element);
-  const htmlItems = items.map((item) => {
-    const text = cleanElementText(item, { excludeNestedLists: true });
-    const nested = directChildrenByType(item, "NodeList").map((nestedList) => listElementToHtml(nestedList)).join("");
-    return `<li>${text ? htmlText(text) : ""}${nested}</li>`;
-  });
-  return `<${tag}>${htmlItems.join("")}</${tag}>`;
-}
-
-function blockToClipboardHtml(element) {
-  if (nodeTypeOf(element) === "NodeList") return listElementToHtml(element);
-  if (nodeTypeOf(element) === "NodeHeading") {
-    const text = cleanElementText(element);
-    if (!text) return "";
-    const level = headingLevelOf(element);
-    return `<h${level}>${htmlText(text)}</h${level}>`;
-  }
-
-  const text = cleanElementText(element);
-  if (!text) return "";
-
-  const list = detectListLines(text);
-  if (list) {
-    return `<${list.tag}>${list.items.map((value) => `<li>${htmlText(value)}</li>`).join("")}</${list.tag}>`;
-  }
-
-  return text
-    .split(/\n{2,}/)
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .map((paragraph) => `<p>${htmlText(paragraph)}</p>`)
-    .join("");
-}
-
-function blocksToClipboardHtml(blocks) {
-  return blocks.map((item) => blockToClipboardHtml(item?.element)).filter(Boolean).join("");
-}
-
-async function writeClipboardData(html, text) {
-  if (!html && !text) throw new Error("没有可复制的内容");
+async function writeClipboardMarkdown(markdown) {
+  if (!markdown) throw new Error("没有可复制的内容");
 
   if (navigator.clipboard?.write && globalThis.ClipboardItem && globalThis.Blob) {
     try {
       await navigator.clipboard.write([
         new globalThis.ClipboardItem({
-          "text/html": new globalThis.Blob([html || escapeHtml(text)], { type: "text/html" }),
-          "text/plain": new globalThis.Blob([text], { type: "text/plain" }),
+          "text/markdown": new globalThis.Blob([markdown], { type: "text/markdown" }),
+          "text/plain": new globalThis.Blob([markdown], { type: "text/plain" }),
         }),
       ]);
-      return "html";
+      return "markdown";
     } catch (error) {
-      debugLog("writeClipboardData:fallback", { message: error?.message || String(error) });
+      debugLog("writeClipboardMarkdown:fallback", { message: error?.message || String(error) });
     }
   }
 
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
+    await navigator.clipboard.writeText(markdown);
     return "text";
   }
 
@@ -1448,13 +1484,12 @@ class XunzhangPlugin extends Plugin {
           return;
         }
 
-        const html = blocksToClipboardHtml(plan.content);
-        const text = blocksToPlainText(plan.content);
-        const mode = await writeClipboardData(html, text);
+        const markdown = blocksToMarkdown(plan.content);
+        const mode = await writeClipboardMarkdown(markdown);
         notify(
-          mode === "html"
-            ? `已复制到剪切板：${plan.content.length} 个内容块`
-            : `已复制为纯文本：${plan.content.length} 个内容块`,
+          mode === "markdown"
+            ? `已复制为 Markdown：${plan.content.length} 个内容块`
+            : `已复制为 Markdown 纯文本：${plan.content.length} 个内容块`,
           false,
           3000,
         );
