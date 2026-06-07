@@ -383,9 +383,77 @@ function normalizeClipboardText(text) {
     .trim();
 }
 
+function nodeTypeOf(element) {
+  return element?.getAttribute?.("data-type") || element?.dataset?.type || "";
+}
+
+function nodeSubtypeOf(element) {
+  return element?.getAttribute?.("data-subtype") || element?.dataset?.subtype || "";
+}
+
+function removeClipboardNoise(element) {
+  element.querySelectorAll(".protyle-action, .protyle-attr, .protyle-icons, .fn__none").forEach((node) => node.remove());
+  element.querySelectorAll('[contenteditable="false"]').forEach((node) => node.remove());
+}
+
+function cleanElementText(element, options = {}) {
+  if (!element?.cloneNode) return "";
+  const clone = element.cloneNode(true);
+  if (options.excludeNestedLists) {
+    clone.querySelectorAll('[data-type="NodeList"]').forEach((node) => node.remove());
+  }
+  removeClipboardNoise(clone);
+  return normalizeClipboardText(clone.innerText || clone.textContent || "");
+}
+
+function htmlText(text) {
+  return escapeHtml(text).replace(/\n/g, "<br>");
+}
+
+function directChildrenByType(element, type) {
+  return Array.from(element?.children || []).filter((child) => nodeTypeOf(child) === type);
+}
+
+function listTagFromElement(element) {
+  return nodeSubtypeOf(element) === "o" ? "ol" : "ul";
+}
+
+function headingLevelOf(element) {
+  const match = String(nodeSubtypeOf(element)).match(/[1-6]/);
+  return match ? Number(match[0]) : 1;
+}
+
+function listElementToPlainText(element, depth = 0) {
+  const items = directChildrenByType(element, "NodeListItem");
+  if (!items.length) return cleanElementText(element);
+  const ordered = listTagFromElement(element) === "ol";
+  const indent = "  ".repeat(depth);
+  const lines = [];
+
+  items.forEach((item, index) => {
+    const text = cleanElementText(item, { excludeNestedLists: true });
+    const prefix = ordered ? `${index + 1}.` : "-";
+    lines.push(`${indent}${prefix}${text ? ` ${text.replace(/\n/g, `\n${indent}  `)}` : ""}`);
+    for (const nested of directChildrenByType(item, "NodeList")) {
+      const nestedText = listElementToPlainText(nested, depth + 1);
+      if (nestedText) lines.push(nestedText);
+    }
+  });
+
+  return lines.join("\n");
+}
+
 function blocksToPlainText(blocks) {
   return blocks
-    .map((item) => normalizeClipboardText(item?.element?.innerText || item?.element?.textContent || ""))
+    .map((item) => {
+      const element = item?.element;
+      if (nodeTypeOf(element) === "NodeList") return listElementToPlainText(element);
+      if (nodeTypeOf(element) === "NodeHeading") {
+        const text = cleanElementText(element);
+        return text ? `${"#".repeat(headingLevelOf(element))} ${text}` : "";
+      }
+      return cleanElementText(element);
+    })
     .filter(Boolean)
     .join("\n\n");
 }
@@ -413,39 +481,50 @@ function detectListLines(text) {
   return null;
 }
 
-function blocksToClipboardHtml(blocks) {
-  const parts = [];
-  let pendingList = null;
-
-  const flushList = () => {
-    if (!pendingList) return;
-    parts.push(`<${pendingList.tag}>${pendingList.items.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</${pendingList.tag}>`);
-    pendingList = null;
-  };
-
-  for (const item of blocks) {
-    const text = normalizeClipboardText(item?.element?.innerText || item?.element?.textContent || "");
-    if (!text) continue;
-
-    const list = detectListLines(text);
-    if (list) {
-      if (!pendingList || pendingList.tag !== list.tag) {
-        flushList();
-        pendingList = { tag: list.tag, items: [] };
-      }
-      pendingList.items.push(...list.items);
-      continue;
-    }
-
-    flushList();
-    const paragraphs = text.split(/\n{2,}/).map((value) => value.trim()).filter(Boolean);
-    for (const paragraph of paragraphs) {
-      parts.push(`<p>${escapeHtml(paragraph).replace(/\n/g, "<br>")}</p>`);
-    }
+function listElementToHtml(element) {
+  const items = directChildrenByType(element, "NodeListItem");
+  if (!items.length) {
+    const list = detectListLines(cleanElementText(element));
+    if (!list) return "";
+    return `<${list.tag}>${list.items.map((value) => `<li>${htmlText(value)}</li>`).join("")}</${list.tag}>`;
   }
 
-  flushList();
-  return parts.join("");
+  const tag = listTagFromElement(element);
+  const htmlItems = items.map((item) => {
+    const text = cleanElementText(item, { excludeNestedLists: true });
+    const nested = directChildrenByType(item, "NodeList").map((nestedList) => listElementToHtml(nestedList)).join("");
+    return `<li>${text ? htmlText(text) : ""}${nested}</li>`;
+  });
+  return `<${tag}>${htmlItems.join("")}</${tag}>`;
+}
+
+function blockToClipboardHtml(element) {
+  if (nodeTypeOf(element) === "NodeList") return listElementToHtml(element);
+  if (nodeTypeOf(element) === "NodeHeading") {
+    const text = cleanElementText(element);
+    if (!text) return "";
+    const level = headingLevelOf(element);
+    return `<h${level}>${htmlText(text)}</h${level}>`;
+  }
+
+  const text = cleanElementText(element);
+  if (!text) return "";
+
+  const list = detectListLines(text);
+  if (list) {
+    return `<${list.tag}>${list.items.map((value) => `<li>${htmlText(value)}</li>`).join("")}</${list.tag}>`;
+  }
+
+  return text
+    .split(/\n{2,}/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((paragraph) => `<p>${htmlText(paragraph)}</p>`)
+    .join("");
+}
+
+function blocksToClipboardHtml(blocks) {
+  return blocks.map((item) => blockToClipboardHtml(item?.element)).filter(Boolean).join("");
 }
 
 async function writeClipboardData(html, text) {

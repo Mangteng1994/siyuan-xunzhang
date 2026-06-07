@@ -65,6 +65,7 @@ The undo stack only records new operations performed while the plugin is loaded.
 
 - Add `Alt+Shift+C` to copy continuous blocks between `批量开始` and `批量结束` to the system clipboard.
 - Prefer writing `text/html` plus `text/plain` to the clipboard, with plain-text fallback when HTML clipboard is unavailable.
+- Preserve paragraph breaks, ordered lists, unordered lists, and heading levels when copying to the clipboard.
 - Clipboard copy does not need `批量目标`, does not remove markers, and does not modify the document.
 
 ### v0.3.5
